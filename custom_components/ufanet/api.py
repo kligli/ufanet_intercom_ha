@@ -1,4 +1,5 @@
-"""Minimal HTTP client for Ufanet intercom.
+"""
+Minimal HTTP client for Ufanet intercom.
 
 Auth flow (Dom API):
 - login via POST /api/v1/auth/auth_by_contract/
@@ -9,28 +10,25 @@ Auth flow (Dom API):
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import json
 import logging
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import Any
 from urllib.parse import urljoin
 
-import async_timeout
 from aiohttp import ClientResponseError, ClientSession
-
-if TYPE_CHECKING:
-    pass
-
-_LOGGER = logging.getLogger(__name__)
 
 from .const import (
     DEFAULT_DOM_URL,
     PHONE_APPLICATION_ID,
     PHONE_COUNTRY_ID,
 )
+
+_LOGGER = logging.getLogger(__name__)
 
 BASE_URL = DEFAULT_DOM_URL
 
@@ -117,6 +115,7 @@ async def phone_auth_apply(
         raise PhoneAuthError(f"Unexpected apply response: {data}")
     return payload
 
+
 @dataclass
 class IntercomInfo:
     """Intercom info subset used by the integration."""
@@ -181,9 +180,15 @@ class UfanetApiClient:
             self._refresh_exp = self._extract_exp(self._refresh_token)
         self._token_update_cb: TokenUpdateCallback | None = None
         self._base_url = base_url or BASE_URL
+        self._token_lock = asyncio.Lock()
+
+    def set_token_update_callback(self, callback: TokenUpdateCallback | None) -> None:
+        """Register a callback invoked when the refresh token rotates."""
+        self._token_update_cb = callback
 
     def _store_tokens(self, access: str, refresh: str | None) -> None:
-        """Apply a new access/refresh pair.
+        """
+        Apply a new access/refresh pair.
 
         Expiry is always taken from the JWT payload.
         The login response nests tokens under ``token.*`` and its ``exp`` is the
@@ -203,15 +208,13 @@ class UfanetApiClient:
         if cb and self._refresh_token:
             await cb(self._refresh_token, self._refresh_exp)
 
-    async def async_get_intercoms(
-        self, on_token_update: TokenUpdateCallback | None = None
-    ) -> list[IntercomInfo]:
+    async def async_get_intercoms(self) -> list[IntercomInfo]:
         """Authenticate (if needed) and get intercom list."""
-        await self._ensure_access_token(on_token_update)
+        await self._ensure_access_token()
         try:
             data = await self._request("GET", "api/v0/skud/shared/")
         except UfanetApiAuthError:
-            await self._login(on_token_update)
+            await self._login()
             data = await self._request("GET", "api/v0/skud/shared/")
 
         return [
@@ -227,33 +230,23 @@ class UfanetApiClient:
             for item in data or []
         ]
 
-    async def async_open_intercom(
-        self,
-        intercom_id: int,
-        on_token_update: TokenUpdateCallback | None = None,
-    ) -> bool:
+    async def async_open_intercom(self, intercom_id: int) -> bool:
         """Authenticate (if needed) and open an intercom."""
-        await self._ensure_access_token(on_token_update)
+        await self._ensure_access_token()
         try:
-            data = await self._request(
-                "GET", f"api/v0/skud/shared/{intercom_id}/open/"
-            )
+            data = await self._request("GET", f"api/v0/skud/shared/{intercom_id}/open/")
         except UfanetApiAuthError:
-            await self._login(on_token_update)
-            data = await self._request(
-                "GET", f"api/v0/skud/shared/{intercom_id}/open/"
-            )
+            await self._login()
+            data = await self._request("GET", f"api/v0/skud/shared/{intercom_id}/open/")
         return bool(data and data.get("result"))
 
-    async def async_get_cameras(
-        self, on_token_update: TokenUpdateCallback | None = None
-    ) -> list[CameraInfo]:
+    async def async_get_cameras(self) -> list[CameraInfo]:
         """Get list of cameras with prepared stream info from dom API."""
-        await self._ensure_access_token(on_token_update)
+        await self._ensure_access_token()
         try:
             data = await self._request("GET", "api/v1/cctv")
         except UfanetApiAuthError:
-            await self._login(on_token_update)
+            await self._login()
             data = await self._request("GET", "api/v1/cctv")
 
         cameras: list[CameraInfo] = []
@@ -278,9 +271,7 @@ class UfanetApiClient:
             )
         return cameras
 
-    async def _login(
-        self, on_token_update: TokenUpdateCallback | None = None
-    ) -> None:
+    async def _login(self) -> None:
         """Full login to obtain access and refresh tokens (requires password)."""
         if not self._allow_password_login or not self._password:
             msg = "Refresh token expired. Please reconfigure the integration."
@@ -300,12 +291,11 @@ class UfanetApiClient:
             raise UfanetApiAuthError(msg)
 
         self._store_tokens(access, refresh)
-        await self._persist_refresh(on_token_update)
+        await self._persist_refresh()
 
-    async def _refresh_access_token(
-        self, on_token_update: TokenUpdateCallback | None = None
-    ) -> bool:
-        """Try to renew access via the refresh token. Returns True on success.
+    async def _refresh_access_token(self) -> bool:
+        """
+        Try to renew access via the refresh token. Returns True on success.
 
         Refresh access token using the stored refresh JWT:
         POST /api/v1/auth/refresh/ with ``{"token": "<refresh-jwt>"}`` returns a
@@ -339,34 +329,30 @@ class UfanetApiClient:
             return False
 
         self._store_tokens(access, data.get("refresh"))
-        await self._persist_refresh(on_token_update)
+        await self._persist_refresh()
         return True
 
-    async def _ensure_access_token(
-        self, on_token_update: TokenUpdateCallback | None = None
-    ) -> None:
+    async def _ensure_access_token(self) -> None:
         """Ensure a valid access token is available (refresh → login)."""
-        if on_token_update:
-            self._token_update_cb = on_token_update
+        async with self._token_lock:
+            now = int(time.time())
+            access_fresh = (
+                self._access_token
+                and self._access_exp is not None
+                and now < self._access_exp - TOKEN_REFRESH_BUFFER
+            )
+            if access_fresh:
+                return
 
-        now = int(time.time())
-        access_fresh = (
-            self._access_token
-            and self._access_exp is not None
-            and now < self._access_exp - TOKEN_REFRESH_BUFFER
-        )
-        if access_fresh:
-            return
+            if await self._refresh_access_token():
+                return
 
-        if await self._refresh_access_token(on_token_update):
-            return
+            if self._allow_password_login:
+                await self._login()
+                return
 
-        if self._allow_password_login:
-            await self._login(on_token_update)
-            return
-
-        msg = "No valid token available. Please reconfigure the integration."
-        raise UfanetApiAuthError(msg)
+            msg = "No valid token available. Please reconfigure the integration."
+            raise UfanetApiAuthError(msg)
 
     @staticmethod
     def _extract_exp(token: str | None) -> int | None:
@@ -384,9 +370,7 @@ class UfanetApiClient:
             return None
 
     @staticmethod
-    def _is_expiring(
-        exp: int | None, skew_seconds: int = TOKEN_REFRESH_BUFFER
-    ) -> bool:
+    def _is_expiring(exp: int | None, skew_seconds: int = TOKEN_REFRESH_BUFFER) -> bool:
         """Return True if token is close to expiration (or we don't know exp)."""
         if exp is None:
             return True
@@ -399,13 +383,11 @@ class UfanetApiClient:
         return UfanetApiClient._extract_exp(token)
 
     @staticmethod
-    def is_expiring(
-        exp: int | None, skew_seconds: int = TOKEN_REFRESH_BUFFER
-    ) -> bool:
+    def is_expiring(exp: int | None, skew_seconds: int = TOKEN_REFRESH_BUFFER) -> bool:
         """Public wrapper for checking whether a token is expiring."""
         return UfanetApiClient._is_expiring(exp, skew_seconds=skew_seconds)
 
-    async def _request(  # noqa: PLR0913
+    async def _request(  # noqa: PLR0912
         self,
         method: str,
         path: str,
@@ -427,7 +409,7 @@ class UfanetApiClient:
         url = urljoin(base_url or self._base_url, path)
 
         try:
-            async with async_timeout.timeout(timeout_seconds):  # noqa: SIM117
+            async with asyncio.timeout(timeout_seconds):
                 async with self._session.request(
                     method, url, json=json, params=params, headers=headers
                 ) as resp:
@@ -439,9 +421,7 @@ class UfanetApiClient:
                             if self._allow_password_login:
                                 await self._login()
                             else:
-                                raise UfanetApiAuthError(
-                                    f"{resp.status}: {text}"
-                                )
+                                raise UfanetApiAuthError(f"{resp.status}: {text}")
                         headers["Authorization"] = f"JWT {self._access_token}"
                         async with self._session.request(
                             method, url, json=json, params=params, headers=headers
@@ -467,6 +447,8 @@ class UfanetApiClient:
                         return await resp.json(content_type=None)
                     except (ValueError, KeyError):
                         return text
+        except TimeoutError as err:
+            raise UfanetApiError("Request timed out") from err
         except ClientResponseError as err:
             if err.status == HTTP_STATUS_UNAUTHORIZED:
                 raise UfanetApiAuthError(str(err)) from err

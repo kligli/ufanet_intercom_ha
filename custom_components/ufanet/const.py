@@ -3,7 +3,7 @@
 DOMAIN = "ufanet"
 
 CONF_CONTRACT = "contract"
-CONF_PASSWORD = "password"  # noqa: S105
+CONF_PASSWORD = "password"
 CONF_INTERCOM_ID = "intercom_id"
 
 # Auth method keys for config flow.
@@ -20,3 +20,6 @@ PHONE_APPLICATION_ID = "ru.ufanet.smarthome"
 PHONE_COUNTRY_ID = 1
 
 DEFAULT_DOM_URL = "https://dom.ufanet.ru/"
+
+STORAGE_KEY = f"{DOMAIN}_credentials"
+STORAGE_VERSION = 1
