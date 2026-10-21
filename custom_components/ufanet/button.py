@@ -8,7 +8,11 @@ from homeassistant.components.button import ButtonEntity, ButtonEntityDescriptio
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.entity import DeviceInfo
 
-from . import create_token_save_callback, get_password_from_storage
+from . import (
+    build_api_client_kwargs,
+    create_token_save_callback,
+    get_password_from_storage,
+)
 from .api import (
     UfanetApiAuthError,
     UfanetApiClient,
@@ -32,25 +36,21 @@ async def async_setup_entry(
 
     store = data.get("_store")
     contract = data.get("_contract")
-    save_token = create_token_save_callback(store, contract)
-
+    save_token = create_token_save_callback(
+        store, contract, hass=hass, entry=entry
+    )
     password = await get_password_from_storage(store, contract)
 
     client = UfanetApiClient(
         session,
         data[CONF_CONTRACT],
         password=password,
-        refresh_token=data.get("refresh_token"),
-        refresh_exp=data.get("refresh_exp"),
+        **build_api_client_kwargs(entry, data),
     )
 
     try:
         intercoms = await client.async_get_intercoms(on_token_update=save_token)
-    except UfanetApiAuthError:
-        intercoms = []
-    except UfanetApiError:
-        intercoms = []
-    except Exception:  # noqa: BLE001
+    except (UfanetApiAuthError, UfanetApiError, Exception):  # noqa: BLE001
         intercoms = []
 
     if not intercoms:
@@ -60,9 +60,10 @@ async def async_setup_entry(
         {"id": intercom.id, "name": intercom_display_name(intercom)}
         for intercom in intercoms
     ]
-
-    buttons = [UfanetOpenDoorButton(entry, data, intercom) for intercom in intercoms_data]
-    async_add_entities(buttons, update_before_add=True)
+    async_add_entities(
+        [UfanetOpenDoorButton(entry, data, intercom) for intercom in intercoms_data],
+        update_before_add=True,
+    )
 
 
 class UfanetOpenDoorButton(ButtonEntity):
@@ -101,15 +102,17 @@ class UfanetOpenDoorButton(ButtonEntity):
 
         store = data.get("_store")
         contract = data.get("_contract")
-        save_token = create_token_save_callback(store, contract)
-
+        save_token = create_token_save_callback(
+            store, contract, hass=self.hass, entry=self._entry
+        )
         password = await get_password_from_storage(store, contract)
 
         client = UfanetApiClient(
             session,
             self._contract,
             password=password,
-            refresh_token=data.get("refresh_token"),
-            refresh_exp=data.get("refresh_exp"),
+            **build_api_client_kwargs(self._entry, data),
         )
-        await client.async_open_intercom(self._intercom_id, on_token_update=save_token)
+        await client.async_open_intercom(
+            self._intercom_id, on_token_update=save_token
+        )

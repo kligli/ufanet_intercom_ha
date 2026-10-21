@@ -10,7 +10,11 @@ from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.entity import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
-from . import create_token_save_callback, get_password_from_storage
+from . import (
+    build_api_client_kwargs,
+    create_token_save_callback,
+    get_password_from_storage,
+)
 from .api import CameraInfo, UfanetApiAuthError, UfanetApiClient, UfanetApiError
 from .const import CONF_CONTRACT, DOMAIN
 
@@ -22,20 +26,18 @@ async def async_setup_entry(
     data = hass.data[DOMAIN][entry.entry_id]
     session = async_get_clientsession(hass)
 
-    # Create callback to save token updates
     store = data.get("_store")
     contract = data.get("_contract")
-    save_token = create_token_save_callback(store, contract)
-
-    # Try to get password from secure storage for re-authentication if needed
+    save_token = create_token_save_callback(
+        store, contract, hass=hass, entry=entry
+    )
     password = await get_password_from_storage(store, contract)
 
     client = UfanetApiClient(
         session,
         data[CONF_CONTRACT],
         password=password,
-        refresh_token=data.get("refresh_token"),
-        refresh_exp=data.get("refresh_exp"),
+        **build_api_client_kwargs(entry, data),
     )
 
     try:
