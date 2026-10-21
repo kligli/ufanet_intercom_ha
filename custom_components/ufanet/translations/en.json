@@ -35,11 +35,30 @@
         "data": {
           "contract_id": "Contract"
         }
+      },
+      "reauth_password": {
+        "title": "Reauthenticate",
+        "description": "Session expired for contract **{contract}**. Enter the personal-cabinet password again.",
+        "data": {
+          "password": "Password"
+        }
+      },
+      "reauth_phone": {
+        "title": "Reauthenticate by phone",
+        "description": "Session expired. Sign in again with a confirmation call.",
+        "data": {
+          "phone": "Phone (+7…)",
+          "dom_url": "Ufanet dom URL"
+        }
       }
     },
     "abort": {
-      "already_configured": "Only one configuration instance is allowed.",
-      "phone_apply_failed": "Could not obtain tokens after the call. Try again."
+      "already_configured": "This contract is already configured.",
+      "phone_apply_failed": "Could not obtain tokens after the call. Try again.",
+      "no_intercoms": "No intercoms available for this account.",
+      "wrong_account": "The confirmed call belongs to a different contract.",
+      "unknown": "Unexpected error. Check logs.",
+      "reauth_successful": "Reauthentication successful."
     },
     "error": {
       "auth": "Invalid login or password.",
@@ -50,10 +69,26 @@
       "phone_call_not_detected": "Call not detected yet. Dial the number and continue."
     }
   },
+  "options": {
+    "step": {
+      "assign": {
+        "title": "Intercom camera ({progress})",
+        "description": "Choose the camera for **{intercom}**. Leave empty (—) for no camera. Default comes from Dom API `cctv_number`.",
+        "data": {
+          "camera_map": "Camera"
+        }
+      }
+    },
+    "abort": {
+      "auth": "Session expired. Reauthenticate the integration first.",
+      "unknown": "Unexpected error. Check logs.",
+      "no_intercoms": "No intercoms available for this account."
+    }
+  },
   "entity": {
     "button": {
       "open_intercom": {
-        "name": "Open intercom"
+        "name": "Open door"
       }
     },
     "camera": {

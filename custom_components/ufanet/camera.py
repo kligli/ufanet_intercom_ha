@@ -1,93 +1,93 @@
-"""Camera platform for Ufanet Intercom."""
+"""Camera platform for Ufanet Intercom.
+
+Cameras are attached to intercom devices via ``camera_map``
+(API ``cctv_number`` by default, overridable in options).
+"""
 
 from __future__ import annotations
 
-import async_timeout
-from homeassistant.components.camera import Camera, CameraEntityFeature
-from homeassistant.config_entries import ConfigEntry
-from homeassistant.core import HomeAssistant
-from homeassistant.helpers.aiohttp_client import async_get_clientsession
-from homeassistant.helpers.entity import DeviceInfo
-from homeassistant.helpers.entity_platform import AddEntitiesCallback
+import asyncio
+import logging
+from typing import TYPE_CHECKING
 
-from . import (
-    build_api_client_kwargs,
-    create_token_save_callback,
-    get_password_from_storage,
-)
-from .api import CameraInfo, UfanetApiAuthError, UfanetApiClient, UfanetApiError
-from .const import CONF_CONTRACT, DOMAIN
+from homeassistant.components.camera import Camera, CameraEntityFeature
+from homeassistant.helpers.aiohttp_client import async_get_clientsession
+
+from .api import UfanetApiAuthError, UfanetApiError
+from .helpers import cameras_by_number, intercom_device_info
+
+if TYPE_CHECKING:
+    from homeassistant.core import HomeAssistant
+    from homeassistant.helpers.entity_platform import AddEntitiesCallback
+
+    from . import UfanetConfigEntry
+    from .api import CameraInfo, IntercomInfo, UfanetApiClient
+
+_LOGGER = logging.getLogger(__name__)
 
 
 async def async_setup_entry(
-    hass: HomeAssistant, entry: ConfigEntry, async_add_entities: AddEntitiesCallback
+    _hass: HomeAssistant,
+    entry: UfanetConfigEntry,
+    async_add_entities: AddEntitiesCallback,
 ) -> None:
-    """Set up cameras."""
-    data = hass.data[DOMAIN][entry.entry_id]
-    session = async_get_clientsession(hass)
+    """Set up one camera entity per intercom that has a linked camera."""
+    runtime = entry.runtime_data
+    by_number = cameras_by_number(runtime.cameras)
+    entities: list[UfanetCamera] = []
 
-    store = data.get("_store")
-    contract = data.get("_contract")
-    save_token = create_token_save_callback(
-        store, contract, hass=hass, entry=entry
-    )
-    password = await get_password_from_storage(store, contract)
+    for intercom in runtime.intercoms:
+        camera_number = runtime.camera_map.get(str(intercom.id))
+        if not camera_number:
+            continue
+        cam = by_number.get(str(camera_number))
+        if not cam:
+            _LOGGER.warning(
+                "Intercom %s mapped to camera %s, but camera is missing from API",
+                intercom.id,
+                camera_number,
+            )
+            continue
+        entities.append(UfanetCamera(entry, intercom, cam, runtime.client))
 
-    client = UfanetApiClient(
-        session,
-        data[CONF_CONTRACT],
-        password=password,
-        **build_api_client_kwargs(entry, data),
-    )
-
-    try:
-        cameras = await client.async_get_cameras(on_token_update=save_token)
-    except UfanetApiAuthError:
-        cameras = []
-    except UfanetApiError:
-        cameras = []
-    except Exception:  # noqa: BLE001
-        cameras = []
-
-    if not cameras:
+    if not entities:
+        _LOGGER.debug("No intercom↔camera links to set up")
         return
 
-    entities = [UfanetCamera(entry, cam, hass, client) for cam in cameras]
-    async_add_entities(entities, update_before_add=True)
+    async_add_entities(entities)
 
 
 class UfanetCamera(Camera):
-    """Camera entity for Ufanet streams."""
+    """Camera entity bound to an intercom device."""
 
     _attr_has_entity_name = True
+    _attr_translation_key = "camera"
 
     def __init__(
         self,
-        entry: ConfigEntry,
+        entry: UfanetConfigEntry,
+        intercom: IntercomInfo,
         cam: CameraInfo,
-        hass: HomeAssistant,
         client: UfanetApiClient,
     ) -> None:
         """Initialize the camera entity."""
         super().__init__()
         self._entry = entry
+        self._intercom = intercom
         self._cam = cam
-        self._hass = hass
         self._client = client
-        self._token_exp: int | None = UfanetApiClient.extract_exp(cam.token_l)
-        self._contract = entry.data[CONF_CONTRACT]
-        self._attr_unique_id = f"{self._contract}_{cam.number}"
-        self.internal_integration_suggested_object_id = (
-            f"{self._contract}_{cam.number}"
-        )
-        self._attr_name = cam.title or cam.address or cam.number
+        self._token_exp: int | None = client.extract_exp(cam.token_l)
+        self._contract = entry.runtime_data.contract
+        # Stable per intercom so remapping the camera keeps the same entity.
+        self._attr_unique_id = f"{self._contract}_{intercom.id}_camera"
+        self._attr_suggested_object_id = f"{self._contract}_{intercom.id}_camera"
         self._stream_url = ""
         self._screenshot_url: str | None = None
         self._update_urls()
-        self._attr_device_info = DeviceInfo(
-            identifiers={(DOMAIN, entry.data.get(CONF_CONTRACT))},
-            name=entry.data.get(CONF_CONTRACT),
-            manufacturer="Ufanet",
+        self._attr_device_info = intercom_device_info(
+            self._contract,
+            intercom,
+            hub_device_id=entry.runtime_data.hub_device_id,
         )
 
     def _update_urls(self) -> None:
@@ -105,34 +105,37 @@ class UfanetCamera(Camera):
 
     async def _refresh_camera_token_if_needed(self) -> None:
         """Refresh camera token_l if it is close to expiration."""
-        if self._token_exp is not None and not UfanetApiClient.is_expiring(
+        if self._token_exp is not None and not self._client.is_expiring(
             self._token_exp
         ):
             return
 
+        target = str(self._cam.number)
         try:
             cameras = await self._client.async_get_cameras()
         except UfanetApiAuthError:
+            _LOGGER.warning("Auth failed while refreshing camera token for %s", target)
+            self._entry.async_start_reauth(self.hass)
             return
-        except Exception:  # noqa: BLE001
+        except UfanetApiError as err:
+            _LOGGER.warning("Failed to refresh camera token for %s: %s", target, err)
             return
 
         for cam in cameras:
-            if cam.number == self._cam.number:
+            if str(cam.number) == target:
                 self._cam = cam
-                self._token_exp = UfanetApiClient.extract_exp(cam.token_l)
+                self._token_exp = self._client.extract_exp(cam.token_l)
                 self._update_urls()
-                break
+                return
+
+        _LOGGER.warning(
+            "Camera %s missing from API response during token refresh", target
+        )
 
     @property
     def supported_features(self) -> CameraEntityFeature:
         """Return supported features."""
         return CameraEntityFeature.STREAM
-
-    @property
-    def supports_stream(self) -> bool:
-        """Advertise stream support explicitly."""
-        return True
 
     async def stream_source(self) -> str | None:
         """Return the stream source."""
@@ -149,12 +152,22 @@ class UfanetCamera(Camera):
 
         if not self._screenshot_url:
             return None
-        session = async_get_clientsession(self._hass)
+        session = async_get_clientsession(self.hass)
         try:
-            async with async_timeout.timeout(10):  # noqa: SIM117
+            async with asyncio.timeout(10):
                 async with session.get(self._screenshot_url) as resp:
-                    if resp.status == 200:  # noqa: PLR2004
+                    if resp.status == 200:
                         return await resp.read()
+                    _LOGGER.debug(
+                        "Screenshot HTTP %s for camera %s",
+                        resp.status,
+                        self._cam.number,
+                    )
                     return None
         except Exception:  # noqa: BLE001
+            _LOGGER.debug(
+                "Screenshot fetch failed for camera %s",
+                self._cam.number,
+                exc_info=True,
+            )
             return None

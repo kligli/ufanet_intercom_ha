@@ -1,4 +1,5 @@
-"""Config flow for the Ufanet Intercom integration.
+"""
+Config flow for the Ufanet Intercom integration.
 
 Auth UX: menu with
 contract+password or phone-call login for accounts without a password.
@@ -12,6 +13,7 @@ from typing import TYPE_CHECKING, Any
 
 import voluptuous as vol
 from homeassistant import config_entries
+from homeassistant.core import callback
 from homeassistant.helpers import selector
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.storage import Store
@@ -29,27 +31,28 @@ from .api import (
 from .const import (
     AUTH_PASSWORD,
     AUTH_PHONE,
-    CONF_ACCESS_TOKEN,
     CONF_AUTH_METHOD,
+    CONF_CAMERA_MAP,
     CONF_CONTRACT,
     CONF_CONTRACT_ID,
     CONF_DOM_URL,
     CONF_PASSWORD,
     CONF_PHONE,
-    CONF_REFRESH_TOKEN,
     DEFAULT_DOM_URL,
     DOMAIN,
+    NONE_CAMERA,
+    STORAGE_KEY,
+    STORAGE_VERSION,
 )
+from .helpers import camera_label, resolve_camera_map
 
 if TYPE_CHECKING:
+    from homeassistant.config_entries import ConfigEntry
     from homeassistant.data_entry_flow import FlowResult
 
 _LOGGER = logging.getLogger(__name__)
 
-STORAGE_KEY = f"{DOMAIN}_credentials"
-STORAGE_VERSION = 1
-
-_CONTACT_LIST_POLLS = 5
+_CONTACT_LIST_POLLS = 10
 _CONTACT_LIST_DELAY = 2
 
 AUTH_ERROR_KEYWORDS = [
@@ -84,6 +87,14 @@ PASSWORD_SCHEMA = vol.Schema(
     }
 )
 
+REAUTH_PASSWORD_SCHEMA = vol.Schema(
+    {
+        vol.Required(CONF_PASSWORD): selector.TextSelector(
+            selector.TextSelectorConfig(type=selector.TextSelectorType.PASSWORD)
+        ),
+    }
+)
+
 PHONE_SCHEMA = vol.Schema(
     {
         vol.Required(CONF_PHONE): selector.TextSelector(
@@ -102,6 +113,13 @@ def _is_auth_error(error_msg: str, exception_name: str) -> bool:
     return any(keyword in error_msg for keyword in AUTH_ERROR_KEYWORDS)
 
 
+def _normalize_dom_url(url: str | None) -> str:
+    dom_url = (url or DEFAULT_DOM_URL).strip()
+    if not dom_url.endswith("/"):
+        dom_url += "/"
+    return dom_url
+
+
 def _contract_label(contract: dict) -> str:
     title = contract.get("title") or str(contract.get("id"))
     addresses = contract.get("addresses") or []
@@ -114,20 +132,182 @@ def _contract_label(contract: dict) -> str:
     return title
 
 
+async def _persist_password_credentials(
+    hass: Any,
+    contract: str,
+    password: str,
+    refresh_token: str | None,
+    refresh_exp: int | None,
+) -> None:
+    store = Store(hass, STORAGE_VERSION, STORAGE_KEY)
+    stored_data = await store.async_load() or {}
+    creds = dict(stored_data.get(contract) or {})
+    creds["password"] = password
+    if refresh_token:
+        creds["refresh_token"] = refresh_token
+        creds["refresh_exp"] = refresh_exp
+    stored_data[contract] = creds
+    await store.async_save(stored_data)
+
+
+async def _persist_phone_tokens(
+    hass: Any,
+    contract_id: str,
+    access: str,
+    refresh: str,
+    refresh_exp: int | None,
+) -> None:
+    store = Store(hass, STORAGE_VERSION, STORAGE_KEY)
+    stored_data = await store.async_load() or {}
+    stored_data[contract_id] = {
+        "refresh_token": refresh,
+        "refresh_exp": refresh_exp,
+        "access_token": access,
+    }
+    await store.async_save(stored_data)
+
+
 class UfanetIntercomConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     """Handle a config flow for Ufanet Intercom."""
 
-    VERSION = 2
+    VERSION = 3
 
     def __init__(self) -> None:
+        """Initialize ephemeral flow state."""
         self._phone_ctx: dict[str, Any] = {}
+        self._reauth_entry: ConfigEntry | None = None
+
+    @staticmethod
+    @callback
+    def async_get_options_flow(
+        _config_entry: ConfigEntry,
+    ) -> config_entries.OptionsFlow:
+        """Return the options flow for camera↔intercom mapping."""
+        return UfanetOptionsFlowHandler()
 
     async def async_step_user(
-        self, user_input: dict[str, Any] | None = None
+        self, _user_input: dict[str, Any] | None = None
     ) -> FlowResult:
         """Choose auth method (password or phone)."""
-        return self.async_show_menu(
-            step_id="user", menu_options=["password", "phone"]
+        return self.async_show_menu(step_id="user", menu_options=["password", "phone"])
+
+    async def async_step_reauth(self, entry_data: dict[str, Any]) -> FlowResult:
+        """Start reauthentication when credentials expire."""
+        self._reauth_entry = self._get_reauth_entry()
+        auth_method = entry_data.get(CONF_AUTH_METHOD, AUTH_PASSWORD)
+        if auth_method == AUTH_PHONE:
+            return await self.async_step_reauth_phone()
+        return await self.async_step_reauth_password()
+
+    async def async_step_reauth_password(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Reauthenticate with contract password."""
+        errors: dict[str, str] = {}
+        entry = self._reauth_entry
+        if entry is None:
+            return self.async_abort(reason="unknown")
+        contract = str(entry.data[CONF_CONTRACT])
+        dom_url = _normalize_dom_url(entry.data.get(CONF_DOM_URL))
+
+        if user_input is not None:
+            password = user_input[CONF_PASSWORD]
+            session = async_get_clientsession(self.hass)
+            client = UfanetApiClient(
+                session, contract, password=password, base_url=dom_url
+            )
+
+            async def save_token(token: str, exp: int | None) -> None:
+                await _persist_password_credentials(
+                    self.hass, contract, password, token, exp
+                )
+
+            client.set_token_update_callback(save_token)
+
+            try:
+                intercoms = await client.async_get_intercoms()
+            except UfanetApiAuthError:
+                errors["base"] = "auth"
+            except UfanetApiError:
+                errors["base"] = "unknown"
+            except Exception as err:
+                error_msg = str(err.args[0] if err.args else err).lower()
+                if _is_auth_error(error_msg, type(err).__name__.lower()):
+                    errors["base"] = "auth"
+                else:
+                    _LOGGER.exception("Unexpected error during Ufanet reauth")
+                    errors["base"] = "unknown"
+            else:
+                if not intercoms:
+                    errors["base"] = "no_intercoms"
+                else:
+                    await _persist_password_credentials(
+                        self.hass,
+                        contract,
+                        password,
+                        None,
+                        None,
+                    )
+                    return self.async_update_reload_and_abort(
+                        entry,
+                        data_updates={
+                            CONF_AUTH_METHOD: AUTH_PASSWORD,
+                            CONF_DOM_URL: dom_url,
+                        },
+                    )
+
+        return self.async_show_form(
+            step_id="reauth_password",
+            data_schema=REAUTH_PASSWORD_SCHEMA,
+            description_placeholders={"contract": contract},
+            errors=errors,
+        )
+
+    async def async_step_reauth_phone(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Reauthenticate via phone call for password-less accounts."""
+        entry = self._reauth_entry
+        if entry is None:
+            return self.async_abort(reason="unknown")
+        errors: dict[str, str] = {}
+        default_url = entry.data.get(CONF_DOM_URL) or DEFAULT_DOM_URL
+
+        if user_input is not None:
+            base_url = _normalize_dom_url(user_input.get(CONF_DOM_URL) or default_url)
+            phone = str(user_input[CONF_PHONE]).strip()
+            session = async_get_clientsession(self.hass)
+            try:
+                init = await phone_auth_init(session, base_url, phone)
+            except Exception as err:  # noqa: BLE001
+                _LOGGER.warning("phone_auth init failed: %r", err)
+                errors["base"] = "phone_init_failed"
+            else:
+                self._phone_ctx = {
+                    "base_url": base_url,
+                    "request_id": init["request_id"],
+                    "phone_to_call": init["phone_to_call"],
+                    "phone": phone,
+                    "reauth": True,
+                    "expected_contract": str(entry.data[CONF_CONTRACT]),
+                }
+                return await self.async_step_phone_confirm()
+
+        return self.async_show_form(
+            step_id="reauth_phone",
+            data_schema=vol.Schema(
+                {
+                    vol.Required(CONF_PHONE): selector.TextSelector(
+                        selector.TextSelectorConfig(type=selector.TextSelectorType.TEL)
+                    ),
+                    vol.Optional(
+                        CONF_DOM_URL, default=default_url
+                    ): selector.TextSelector(
+                        selector.TextSelectorConfig(type=selector.TextSelectorType.URL)
+                    ),
+                }
+            ),
+            errors=errors,
         )
 
     async def async_step_password(
@@ -139,9 +319,7 @@ class UfanetIntercomConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         if user_input is not None:
             contract = str(user_input[CONF_CONTRACT]).strip()
             password = user_input[CONF_PASSWORD]
-            dom_url = (user_input.get(CONF_DOM_URL) or DEFAULT_DOM_URL).strip()
-            if not dom_url.endswith("/"):
-                dom_url += "/"
+            dom_url = _normalize_dom_url(user_input.get(CONF_DOM_URL))
 
             await self.async_set_unique_id(contract)
             self._abort_if_unique_id_configured()
@@ -151,24 +329,21 @@ class UfanetIntercomConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 session, contract, password=password, base_url=dom_url
             )
 
-            store = Store(self.hass, STORAGE_VERSION, STORAGE_KEY)
-            stored_data = await store.async_load() or {}
-
             async def save_token(token: str, exp: int | None) -> None:
-                if contract not in stored_data:
-                    stored_data[contract] = {}
-                stored_data[contract]["refresh_token"] = token
-                stored_data[contract]["refresh_exp"] = exp
-                stored_data[contract]["password"] = password
-                await store.async_save(stored_data)
+                await _persist_password_credentials(
+                    self.hass, contract, password, token, exp
+                )
+
+            client.set_token_update_callback(save_token)
 
             try:
-                intercoms = await client.async_get_intercoms(
-                    on_token_update=save_token
-                )
+                intercoms = await client.async_get_intercoms()
                 if not intercoms:
                     errors["base"] = "no_intercoms"
                 else:
+                    await _persist_password_credentials(
+                        self.hass, contract, password, None, None
+                    )
                     intercoms_data = [
                         {
                             "id": intercom.id,
@@ -189,7 +364,7 @@ class UfanetIntercomConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 errors["base"] = "auth"
             except UfanetApiError:
                 errors["base"] = "unknown"
-            except Exception as err:  # noqa: BLE001
+            except Exception as err:
                 error_msg = str(err.args[0] if err.args else err).lower()
                 if _is_auth_error(error_msg, type(err).__name__.lower()):
                     errors["base"] = "auth"
@@ -209,9 +384,7 @@ class UfanetIntercomConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         """Start phone-call auth (accounts without a local password)."""
         errors: dict[str, str] = {}
         if user_input is not None:
-            base_url = (user_input.get(CONF_DOM_URL) or DEFAULT_DOM_URL).strip()
-            if not base_url.endswith("/"):
-                base_url += "/"
+            base_url = _normalize_dom_url(user_input.get(CONF_DOM_URL))
             phone = str(user_input[CONF_PHONE]).strip()
             session = async_get_clientsession(self.hass)
             try:
@@ -225,6 +398,7 @@ class UfanetIntercomConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     "request_id": init["request_id"],
                     "phone_to_call": init["phone_to_call"],
                     "phone": phone,
+                    "reauth": False,
                 }
                 return await self.async_step_phone_confirm()
 
@@ -270,9 +444,7 @@ class UfanetIntercomConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         return self.async_show_form(
             step_id="phone_confirm",
             data_schema=vol.Schema({}),
-            description_placeholders={
-                "phone_to_call": ctx.get("phone_to_call", "")
-            },
+            description_placeholders={"phone_to_call": ctx.get("phone_to_call", "")},
             errors=errors,
         )
 
@@ -282,9 +454,7 @@ class UfanetIntercomConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         """Pick a contract when the phone is tied to several accounts."""
         ctx = self._phone_ctx
         if user_input is not None:
-            return await self._finish_phone(
-                {"id": int(user_input[CONF_CONTRACT_ID])}
-            )
+            return await self._finish_phone({"id": int(user_input[CONF_CONTRACT_ID])})
         return self.async_show_form(
             step_id="phone_contract",
             data_schema=vol.Schema(
@@ -296,6 +466,12 @@ class UfanetIntercomConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         ctx = self._phone_ctx
         contract_id = str(contract["id"])
         session = async_get_clientsession(self.hass)
+
+        if ctx.get("reauth"):
+            expected = ctx.get("expected_contract")
+            if expected and contract_id != expected:
+                return self.async_abort(reason="wrong_account")
+
         try:
             tokens = await phone_auth_apply(
                 session, ctx["base_url"], ctx["request_id"], int(contract_id)
@@ -304,22 +480,16 @@ class UfanetIntercomConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             _LOGGER.warning("phone_auth apply failed: %r", err)
             return self.async_abort(reason="phone_apply_failed")
 
-        await self.async_set_unique_id(contract_id)
-        self._abort_if_unique_id_configured()
-
-        # Seed refresh into Store so platforms share the same rotation path.
-        store = Store(self.hass, STORAGE_VERSION, STORAGE_KEY)
-        stored_data = await store.async_load() or {}
         refresh = tokens["refresh"]
         refresh_exp = UfanetApiClient.extract_exp(refresh)
-        stored_data[contract_id] = {
-            "refresh_token": refresh,
-            "refresh_exp": refresh_exp,
-            "access_token": tokens["access"],
-        }
-        await store.async_save(stored_data)
+        await _persist_phone_tokens(
+            self.hass,
+            contract_id,
+            tokens["access"],
+            refresh,
+            refresh_exp,
+        )
 
-        # Validate tokens by listing intercoms.
         client = UfanetApiClient(
             session,
             contract_id,
@@ -331,31 +501,144 @@ class UfanetIntercomConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         )
 
         async def save_token(token: str, exp: int | None) -> None:
-            stored = await store.async_load() or {}
-            stored.setdefault(contract_id, {})
-            stored[contract_id]["refresh_token"] = token
-            stored[contract_id]["refresh_exp"] = exp
-            await store.async_save(stored)
+            await _persist_phone_tokens(
+                self.hass, contract_id, tokens["access"], token, exp
+            )
+
+        client.set_token_update_callback(save_token)
 
         try:
-            intercoms = await client.async_get_intercoms(on_token_update=save_token)
+            intercoms = await client.async_get_intercoms()
         except Exception as err:  # noqa: BLE001
             _LOGGER.warning("phone auth: failed to list intercoms: %r", err)
-            intercoms = []
+            return self.async_abort(reason="unknown")
+
+        if not intercoms:
+            return self.async_abort(reason="no_intercoms")
 
         intercoms_data = [
             {"id": i.id, "name": intercom_display_name(i)} for i in intercoms
         ]
+        entry_data = {
+            CONF_CONTRACT: contract_id,
+            CONF_AUTH_METHOD: AUTH_PHONE,
+            CONF_DOM_URL: ctx["base_url"],
+            CONF_CONTRACT_ID: contract_id,
+            "intercoms": intercoms_data,
+        }
+
+        if ctx.get("reauth") and self._reauth_entry:
+            return self.async_update_reload_and_abort(
+                self._reauth_entry,
+                data_updates=entry_data,
+            )
+
+        await self.async_set_unique_id(contract_id)
+        self._abort_if_unique_id_configured()
 
         return self.async_create_entry(
             title=contract_id,
-            data={
-                CONF_CONTRACT: contract_id,
-                CONF_AUTH_METHOD: AUTH_PHONE,
-                CONF_DOM_URL: ctx["base_url"],
-                CONF_ACCESS_TOKEN: tokens["access"],
-                CONF_REFRESH_TOKEN: refresh,
-                CONF_CONTRACT_ID: contract_id,
-                "intercoms": intercoms_data,
+            data=entry_data,
+        )
+
+
+async def _client_from_entry(hass: Any, entry: ConfigEntry) -> UfanetApiClient:
+    """Rebuild an API client from Store credentials for options/reconfigure."""
+    contract = str(entry.data[CONF_CONTRACT])
+    store = Store(hass, STORAGE_VERSION, STORAGE_KEY)
+    stored = await store.async_load() or {}
+    creds = stored.get(contract) or {}
+    auth_method = entry.data.get(CONF_AUTH_METHOD, AUTH_PASSWORD)
+    is_phone = auth_method == AUTH_PHONE
+    return UfanetApiClient(
+        async_get_clientsession(hass),
+        contract,
+        password=None if is_phone else creds.get("password"),
+        access_token=creds.get("access_token"),
+        refresh_token=creds.get("refresh_token"),
+        refresh_exp=creds.get("refresh_exp"),
+        base_url=entry.data.get(CONF_DOM_URL) or DEFAULT_DOM_URL,
+        allow_password_login=not is_phone,
+    )
+
+
+class UfanetOptionsFlowHandler(config_entries.OptionsFlow):
+    """Options flow: pick which camera belongs to each intercom."""
+
+    def __init__(self) -> None:
+        """Initialize options flow state."""
+        self._intercoms: list[Any] = []
+        self._camera_choices: dict[str, str] = {}
+        self._pending_map: dict[str, str] = {}
+        self._index = 0
+
+    async def async_step_init(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Load lists, then walk intercoms one by one."""
+        del user_input
+        entry = self.config_entry
+        try:
+            client = await _client_from_entry(self.hass, entry)
+            self._intercoms = await client.async_get_intercoms()
+            cameras = await client.async_get_cameras()
+        except UfanetApiAuthError:
+            return self.async_abort(reason="auth")
+        except (UfanetApiError, Exception):
+            _LOGGER.exception("Failed to load intercoms/cameras for options")
+            return self.async_abort(reason="unknown")
+
+        if not self._intercoms:
+            return self.async_abort(reason="no_intercoms")
+
+        self._camera_choices = {NONE_CAMERA: "—"}
+        for cam in cameras:
+            self._camera_choices[str(cam.number)] = camera_label(cam)
+
+        self._pending_map = dict(resolve_camera_map(entry, self._intercoms))
+        self._index = 0
+        return await self.async_step_assign()
+
+    async def async_step_assign(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Assign a camera to the current intercom."""
+        intercom = self._intercoms[self._index]
+        key = str(intercom.id)
+
+        if user_input is not None:
+            selected = user_input.get(CONF_CAMERA_MAP, NONE_CAMERA)
+            if selected and selected != NONE_CAMERA:
+                self._pending_map[key] = str(selected)
+            else:
+                self._pending_map.pop(key, None)
+
+            self._index += 1
+            if self._index >= len(self._intercoms):
+                return self.async_create_entry(
+                    title="",
+                    data={
+                        **self.config_entry.options,
+                        CONF_CAMERA_MAP: self._pending_map,
+                    },
+                )
+            return await self.async_step_assign()
+
+        default = self._pending_map.get(key, NONE_CAMERA)
+        if default not in self._camera_choices:
+            default = NONE_CAMERA
+
+        return self.async_show_form(
+            step_id="assign",
+            data_schema=vol.Schema(
+                {
+                    vol.Required(CONF_CAMERA_MAP, default=default): vol.In(
+                        self._camera_choices
+                    )
+                }
+            ),
+            description_placeholders={
+                "intercom": intercom_display_name(intercom),
+                "progress": f"{self._index + 1}/{len(self._intercoms)}",
             },
         )
