@@ -56,6 +56,7 @@ class UfanetRuntimeData:
     intercoms: list[IntercomInfo]
     cameras: list[CameraInfo]
     camera_map: dict[str, str]
+    hub_device_id: str | None = None
 
 
 async def _save_tokens(
@@ -218,9 +219,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: UfanetConfigEntry) -> bo
 
     camera_map = resolve_camera_map(entry, intercoms)
 
-    # Account hub device; intercom devices attach via_device.
+    # Account hub device; intercom devices attach via via_device_id.
     device_registry = dr.async_get(hass)
-    device_registry.async_get_or_create(
+    hub_device = device_registry.async_get_or_create(
         config_entry_id=entry.entry_id,
         identifiers={(DOMAIN, contract)},
         manufacturer="Ufanet",
@@ -235,6 +236,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: UfanetConfigEntry) -> bo
         intercoms=intercoms,
         cameras=cameras,
         camera_map=camera_map,
+        hub_device_id=hub_device.id,
     )
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     entry.async_on_unload(entry.add_update_listener(_async_reload_entry))

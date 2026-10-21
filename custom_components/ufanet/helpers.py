@@ -13,13 +13,25 @@ if TYPE_CHECKING:
     from homeassistant.config_entries import ConfigEntry
 
 
+def supports_via_device_id() -> bool:
+    """Return True when DeviceInfo accepts via_device_id (HA 2026.8+)."""
+    optional = getattr(DeviceInfo, "__optional_keys__", None)
+    if optional is not None and "via_device_id" in optional:
+        return True
+    annotations = getattr(DeviceInfo, "__annotations__", {})
+    return "via_device_id" in annotations
+
+
 def intercom_device_id(contract: str, intercom_id: int) -> str:
     """Stable device identifier for an intercom (+ its camera)."""
     return f"{contract}_{intercom_id}"
 
 
 def intercom_device_info(
-    contract: str, intercom: IntercomInfo, *, via_hub: bool = True
+    contract: str,
+    intercom: IntercomInfo,
+    *,
+    hub_device_id: str | None = None,
 ) -> DeviceInfo:
     """DeviceInfo shared by the open-door button and linked camera."""
     kwargs: dict = {
@@ -28,8 +40,9 @@ def intercom_device_info(
         "manufacturer": "Ufanet",
         "model": "Intercom",
     }
-    if via_hub:
-        kwargs["via_device"] = (DOMAIN, contract)
+    # Prefer via_device_id; never set deprecated via_device (raises on modern HA).
+    if hub_device_id and supports_via_device_id():
+        kwargs["via_device_id"] = hub_device_id
     if intercom.address:
         kwargs["suggested_area"] = intercom.address
     return DeviceInfo(**kwargs)
