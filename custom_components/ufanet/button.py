@@ -6,20 +6,16 @@ from typing import TYPE_CHECKING
 
 from homeassistant.components.button import ButtonEntity, ButtonEntityDescription
 from homeassistant.exceptions import HomeAssistantError
-from homeassistant.helpers.entity import DeviceInfo
 
-from .api import (
-    UfanetApiAuthError,
-    UfanetApiError,
-    intercom_display_name,
-)
-from .const import DOMAIN
+from .api import UfanetApiAuthError, UfanetApiError
+from .helpers import intercom_device_info
 
 if TYPE_CHECKING:
     from homeassistant.core import HomeAssistant
     from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
     from . import UfanetConfigEntry
+    from .api import IntercomInfo
 
 
 async def async_setup_entry(
@@ -28,16 +24,10 @@ async def async_setup_entry(
     async_add_entities: AddEntitiesCallback,
 ) -> None:
     """Set up button entities for all intercoms."""
-    intercoms = entry.runtime_data.intercoms
-
     async_add_entities(
         [
-            UfanetOpenDoorButton(
-                entry,
-                intercom_id=intercom.id,
-                intercom_name=intercom_display_name(intercom),
-            )
-            for intercom in intercoms
+            UfanetOpenDoorButton(entry, intercom)
+            for intercom in entry.runtime_data.intercoms
         ]
     )
 
@@ -47,34 +37,22 @@ class UfanetOpenDoorButton(ButtonEntity):
 
     _attr_has_entity_name = True
 
-    def __init__(
-        self,
-        entry: UfanetConfigEntry,
-        *,
-        intercom_id: int,
-        intercom_name: str,
-    ) -> None:
+    def __init__(self, entry: UfanetConfigEntry, intercom: IntercomInfo) -> None:
         """Initialize the button entity."""
         self._entry = entry
         self._contract = entry.runtime_data.contract
-        self._intercom_id = intercom_id
+        self._intercom_id = intercom.id
 
         self.entity_description = ButtonEntityDescription(
-            key=f"open_intercom_{intercom_id}",
+            key=f"open_intercom_{intercom.id}",
             translation_key="open_intercom",
             icon="mdi:door",
         )
 
-        self._attr_unique_id = f"{self._contract}_{intercom_id}"
-        self._attr_suggested_object_id = f"{self._contract}_{intercom_id}"
-        self._attr_name = intercom_name
-        self._attr_device_info = DeviceInfo(
-            identifiers={(DOMAIN, f"{self._contract}_{intercom_id}")},
-            name=intercom_name,
-            manufacturer="Ufanet",
-            model="Intercom",
-            via_device=(DOMAIN, self._contract),
-        )
+        # Keep legacy unique_id so existing installs don't get duplicate buttons.
+        self._attr_unique_id = f"{self._contract}_{intercom.id}"
+        self._attr_suggested_object_id = f"{self._contract}_{intercom.id}"
+        self._attr_device_info = intercom_device_info(self._contract, intercom)
 
     async def async_press(self) -> None:
         """Handle the button press to open the intercom."""

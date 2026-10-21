@@ -125,6 +125,8 @@ class IntercomInfo:
     string_view: str | None = None
     custom_name: str | None = None
     address: str | None = None
+    # Dom API links SKUD ↔ CCTV via this field (camera ``number``).
+    cctv_number: str | None = None
 
 
 def intercom_display_name(intercom: IntercomInfo) -> str:
@@ -217,18 +219,25 @@ class UfanetApiClient:
             await self._login()
             data = await self._request("GET", "api/v0/skud/shared/")
 
-        return [
-            IntercomInfo(
-                id=item.get("id"),
-                role_name=(
-                    item.get("role", {}).get("name") if item.get("role") else None
-                ),
-                string_view=item.get("string_view"),
-                custom_name=item.get("custom_name"),
-                address=item.get("address"),
+        intercoms: list[IntercomInfo] = []
+        for item in data or []:
+            intercom_id = item.get("id")
+            if intercom_id is None:
+                continue
+            cctv = item.get("cctv_number")
+            intercoms.append(
+                IntercomInfo(
+                    id=intercom_id,
+                    role_name=(
+                        item.get("role", {}).get("name") if item.get("role") else None
+                    ),
+                    string_view=item.get("string_view"),
+                    custom_name=item.get("custom_name"),
+                    address=item.get("address"),
+                    cctv_number=str(cctv) if cctv not in (None, "") else None,
+                )
             )
-            for item in data or []
-        ]
+        return intercoms
 
     async def async_open_intercom(self, intercom_id: int) -> bool:
         """Authenticate (if needed) and open an intercom."""
@@ -252,16 +261,18 @@ class UfanetApiClient:
         cameras: list[CameraInfo] = []
         results = data if isinstance(data, list) else []
         for item in results or []:
-            servers = item.get("servers", {})
+            servers = item.get("servers") or {}
             domain = servers.get("domain")
             screenshot_domain = servers.get("screenshot_domain")
             number = item.get("number")
             token_l = item.get("token_l")
+            # Domain + number are required to build a stream URL; token may be
+            # refreshed later, but without it the camera is not usable yet.
             if not (domain and number and token_l):
                 continue
             cameras.append(
                 CameraInfo(
-                    number=number,
+                    number=str(number),
                     title=item.get("title"),
                     address=item.get("address"),
                     domain=domain,
