@@ -12,12 +12,19 @@ from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.storage import Store
 
-from .api import IntercomInfo, UfanetApiAuthError, UfanetApiClient, UfanetApiError
+from .api import (
+    CameraInfo,
+    IntercomInfo,
+    UfanetApiAuthError,
+    UfanetApiClient,
+    UfanetApiError,
+)
 from .const import (
     AUTH_PASSWORD,
     AUTH_PHONE,
     CONF_ACCESS_TOKEN,
     CONF_AUTH_METHOD,
+    CONF_CAMERA_MAP,
     CONF_CONTRACT,
     CONF_DOM_URL,
     CONF_REFRESH_TOKEN,
@@ -26,6 +33,7 @@ from .const import (
     STORAGE_KEY,
     STORAGE_VERSION,
 )
+from .helpers import default_camera_map, resolve_camera_map
 
 if TYPE_CHECKING:
     from homeassistant.config_entries import ConfigEntry
@@ -46,6 +54,8 @@ class UfanetRuntimeData:
     store: Store
     contract: str
     intercoms: list[IntercomInfo]
+    cameras: list[CameraInfo]
+    camera_map: dict[str, str]
 
 
 async def _save_tokens(
@@ -186,6 +196,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: UfanetConfigEntry) -> bo
 
     try:
         intercoms = await client.async_get_intercoms()
+        cameras = await client.async_get_cameras()
     except UfanetApiAuthError as err:
         raise ConfigEntryAuthFailed(str(err)) from err
     except UfanetApiError as err:
@@ -195,7 +206,19 @@ async def async_setup_entry(hass: HomeAssistant, entry: UfanetConfigEntry) -> bo
         msg = "No intercoms available for this account"
         raise ConfigEntryNotReady(msg)
 
-    # Account hub device; platforms attach via_device.
+    # Seed options with API defaults once, so the UI shows current links.
+    if CONF_CAMERA_MAP not in entry.options:
+        hass.config_entries.async_update_entry(
+            entry,
+            options={
+                **entry.options,
+                CONF_CAMERA_MAP: default_camera_map(intercoms),
+            },
+        )
+
+    camera_map = resolve_camera_map(entry, intercoms)
+
+    # Account hub device; intercom devices attach via_device.
     device_registry = dr.async_get(hass)
     device_registry.async_get_or_create(
         config_entry_id=entry.entry_id,
@@ -210,9 +233,17 @@ async def async_setup_entry(hass: HomeAssistant, entry: UfanetConfigEntry) -> bo
         store=store,
         contract=contract,
         intercoms=intercoms,
+        cameras=cameras,
+        camera_map=camera_map,
     )
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
+    entry.async_on_unload(entry.add_update_listener(_async_reload_entry))
     return True
+
+
+async def _async_reload_entry(hass: HomeAssistant, entry: UfanetConfigEntry) -> None:
+    """Reload when options (camera map) change."""
+    await hass.config_entries.async_reload(entry.entry_id)
 
 
 async def async_unload_entry(hass: HomeAssistant, entry: UfanetConfigEntry) -> bool:

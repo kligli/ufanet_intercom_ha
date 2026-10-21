@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING, Any
 
 import voluptuous as vol
 from homeassistant import config_entries
+from homeassistant.core import callback
 from homeassistant.helpers import selector
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.storage import Store
@@ -31,6 +32,7 @@ from .const import (
     AUTH_PASSWORD,
     AUTH_PHONE,
     CONF_AUTH_METHOD,
+    CONF_CAMERA_MAP,
     CONF_CONTRACT,
     CONF_CONTRACT_ID,
     CONF_DOM_URL,
@@ -38,9 +40,11 @@ from .const import (
     CONF_PHONE,
     DEFAULT_DOM_URL,
     DOMAIN,
+    NONE_CAMERA,
     STORAGE_KEY,
     STORAGE_VERSION,
 )
+from .helpers import camera_label, resolve_camera_map
 
 if TYPE_CHECKING:
     from homeassistant.config_entries import ConfigEntry
@@ -172,6 +176,14 @@ class UfanetIntercomConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         """Initialize ephemeral flow state."""
         self._phone_ctx: dict[str, Any] = {}
         self._reauth_entry: ConfigEntry | None = None
+
+    @staticmethod
+    @callback
+    def async_get_options_flow(
+        _config_entry: ConfigEntry,
+    ) -> config_entries.OptionsFlow:
+        """Return the options flow for camera↔intercom mapping."""
+        return UfanetOptionsFlowHandler()
 
     async def async_step_user(
         self, _user_input: dict[str, Any] | None = None
@@ -527,4 +539,106 @@ class UfanetIntercomConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         return self.async_create_entry(
             title=contract_id,
             data=entry_data,
+        )
+
+
+async def _client_from_entry(hass: Any, entry: ConfigEntry) -> UfanetApiClient:
+    """Rebuild an API client from Store credentials for options/reconfigure."""
+    contract = str(entry.data[CONF_CONTRACT])
+    store = Store(hass, STORAGE_VERSION, STORAGE_KEY)
+    stored = await store.async_load() or {}
+    creds = stored.get(contract) or {}
+    auth_method = entry.data.get(CONF_AUTH_METHOD, AUTH_PASSWORD)
+    is_phone = auth_method == AUTH_PHONE
+    return UfanetApiClient(
+        async_get_clientsession(hass),
+        contract,
+        password=None if is_phone else creds.get("password"),
+        access_token=creds.get("access_token"),
+        refresh_token=creds.get("refresh_token"),
+        refresh_exp=creds.get("refresh_exp"),
+        base_url=entry.data.get(CONF_DOM_URL) or DEFAULT_DOM_URL,
+        allow_password_login=not is_phone,
+    )
+
+
+class UfanetOptionsFlowHandler(config_entries.OptionsFlow):
+    """Options flow: pick which camera belongs to each intercom."""
+
+    def __init__(self) -> None:
+        """Initialize options flow state."""
+        self._intercoms: list[Any] = []
+        self._camera_choices: dict[str, str] = {}
+        self._pending_map: dict[str, str] = {}
+        self._index = 0
+
+    async def async_step_init(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Load lists, then walk intercoms one by one."""
+        del user_input
+        entry = self.config_entry
+        try:
+            client = await _client_from_entry(self.hass, entry)
+            self._intercoms = await client.async_get_intercoms()
+            cameras = await client.async_get_cameras()
+        except UfanetApiAuthError:
+            return self.async_abort(reason="auth")
+        except (UfanetApiError, Exception):
+            _LOGGER.exception("Failed to load intercoms/cameras for options")
+            return self.async_abort(reason="unknown")
+
+        if not self._intercoms:
+            return self.async_abort(reason="no_intercoms")
+
+        self._camera_choices = {NONE_CAMERA: "—"}
+        for cam in cameras:
+            self._camera_choices[str(cam.number)] = camera_label(cam)
+
+        self._pending_map = dict(resolve_camera_map(entry, self._intercoms))
+        self._index = 0
+        return await self.async_step_assign()
+
+    async def async_step_assign(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Assign a camera to the current intercom."""
+        intercom = self._intercoms[self._index]
+        key = str(intercom.id)
+
+        if user_input is not None:
+            selected = user_input.get(CONF_CAMERA_MAP, NONE_CAMERA)
+            if selected and selected != NONE_CAMERA:
+                self._pending_map[key] = str(selected)
+            else:
+                self._pending_map.pop(key, None)
+
+            self._index += 1
+            if self._index >= len(self._intercoms):
+                return self.async_create_entry(
+                    title="",
+                    data={
+                        **self.config_entry.options,
+                        CONF_CAMERA_MAP: self._pending_map,
+                    },
+                )
+            return await self.async_step_assign()
+
+        default = self._pending_map.get(key, NONE_CAMERA)
+        if default not in self._camera_choices:
+            default = NONE_CAMERA
+
+        return self.async_show_form(
+            step_id="assign",
+            data_schema=vol.Schema(
+                {
+                    vol.Required(CONF_CAMERA_MAP, default=default): vol.In(
+                        self._camera_choices
+                    )
+                }
+            ),
+            description_placeholders={
+                "intercom": intercom_display_name(intercom),
+                "progress": f"{self._index + 1}/{len(self._intercoms)}",
+            },
         )

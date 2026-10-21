@@ -69,10 +69,26 @@
       "phone_call_not_detected": "Call not detected yet. Dial the number and continue."
     }
   },
+  "options": {
+    "step": {
+      "assign": {
+        "title": "Intercom camera ({progress})",
+        "description": "Choose the camera for **{intercom}**. Leave empty (—) for no camera. Default comes from Dom API `cctv_number`.",
+        "data": {
+          "camera_map": "Camera"
+        }
+      }
+    },
+    "abort": {
+      "auth": "Session expired. Reauthenticate the integration first.",
+      "unknown": "Unexpected error. Check logs.",
+      "no_intercoms": "No intercoms available for this account."
+    }
+  },
   "entity": {
     "button": {
       "open_intercom": {
-        "name": "Open intercom"
+        "name": "Open door"
       }
     },
     "camera": {
