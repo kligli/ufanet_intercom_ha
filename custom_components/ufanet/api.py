@@ -55,16 +55,46 @@ class PhoneAuthError(UfanetApiError):
     """Raised when a phone-call auth step fails."""
 
 
+# Dom phone-auth endpoints expect the Android app UA. Home Assistant's default
+# aiohttp UA can get an empty HTTP 306 body, which breaks JSON decoding.
+_PHONE_USER_AGENT = "okhttp/4.9.0"
+
+
 async def _phone_post(
     session: ClientSession,
     base_url: str,
     path: str,
     payload: dict[str, Any] | None = None,
+    *,
+    allow_empty: bool = False,
 ) -> dict[str, Any]:
+    """POST to a phone-auth endpoint and return a JSON object.
+
+    When ``allow_empty`` is True, an empty or non-JSON body (e.g. HTTP 306
+    while the confirmation call is not registered yet) becomes ``{}``.
+    """
     url = urljoin(base_url if base_url.endswith("/") else base_url + "/", path)
-    async with session.post(url, json=payload) as resp:
-        resp.raise_for_status()
-        return await resp.json()
+    headers = {"User-Agent": _PHONE_USER_AGENT}
+    async with session.post(url, json=payload, headers=headers) as resp:
+        body = await resp.read()
+        if resp.status >= HTTP_STATUS_BAD_REQUEST:
+            text = body.decode(errors="replace")
+            raise PhoneAuthError(f"{resp.status}: {text}")
+        if not body:
+            if allow_empty:
+                return {}
+            raise PhoneAuthError(f"Empty response (HTTP {resp.status})")
+        try:
+            data = json.loads(body)
+        except json.JSONDecodeError as err:
+            if allow_empty:
+                return {}
+            raise PhoneAuthError(f"Non-JSON response (HTTP {resp.status})") from err
+        if not isinstance(data, dict):
+            if allow_empty:
+                return {}
+            raise PhoneAuthError(f"Unexpected JSON type: {type(data).__name__}")
+        return data
 
 
 async def phone_auth_init(
@@ -90,12 +120,17 @@ async def phone_auth_init(
 async def phone_auth_contact_list(
     session: ClientSession, base_url: str, request_id: str
 ) -> list[dict[str, Any]]:
-    """Return contracts tied to the calling number once the call landed."""
+    """Return contracts tied to the calling number once the call landed.
+
+    An empty HTTP body (seen as 306 before the call is registered) is treated
+    as «not ready yet» and returns an empty list so the config flow can poll.
+    """
     data = await _phone_post(
         session,
         base_url,
         "api/v4/phone_auth/call/contact_list/",
         {"request_id": request_id},
+        allow_empty=True,
     )
     return ((data.get("data") or {}).get("contracts")) or []
 
