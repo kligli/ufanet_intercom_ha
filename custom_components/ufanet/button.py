@@ -52,7 +52,11 @@ class UfanetOpenDoorButton(ButtonEntity):
         # Keep legacy unique_id so existing installs don't get duplicate buttons.
         self._attr_unique_id = f"{self._contract}_{intercom.id}"
         self._attr_suggested_object_id = f"{self._contract}_{intercom.id}"
-        self._attr_device_info = intercom_device_info(self._contract, intercom)
+        self._attr_device_info = intercom_device_info(
+            self._contract,
+            intercom,
+            hub_device_id=entry.runtime_data.hub_device_id,
+        )
 
     async def async_press(self) -> None:
         """Handle the button press to open the intercom."""

@@ -84,7 +84,11 @@ class UfanetCamera(Camera):
         self._stream_url = ""
         self._screenshot_url: str | None = None
         self._update_urls()
-        self._attr_device_info = intercom_device_info(self._contract, intercom)
+        self._attr_device_info = intercom_device_info(
+            self._contract,
+            intercom,
+            hub_device_id=entry.runtime_data.hub_device_id,
+        )
 
     def _update_urls(self) -> None:
         """Update stream and screenshot URLs based on current camera info."""
