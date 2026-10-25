@@ -29,6 +29,7 @@ async def async_setup_entry(
             UfanetOpenDoorButton(entry, intercom)
             for intercom in entry.runtime_data.intercoms
         ]
+        + ([UfanetAnswerButton(entry)] if entry.runtime_data.sip is not None else [])
     )
 
 
@@ -74,3 +75,35 @@ class UfanetOpenDoorButton(ButtonEntity):
         if not opened:
             msg = "Intercom did not confirm open"
             raise HomeAssistantError(msg)
+
+
+class UfanetAnswerButton(ButtonEntity):
+    """Answer the SIP monitor call from the panel."""
+
+    _attr_has_entity_name = True
+
+    def __init__(self, entry: UfanetConfigEntry) -> None:
+        """Initialize the answer button."""
+        self._entry = entry
+        contract = entry.runtime_data.contract
+        self.entity_description = ButtonEntityDescription(
+            key="answer_sip",
+            translation_key="answer_sip",
+            icon="mdi:phone",
+        )
+        self._attr_unique_id = f"{contract}_sip_answer"
+        self._attr_suggested_object_id = f"{contract}_sip_answer"
+        intercom = entry.runtime_data.intercoms[0]
+        self._attr_device_info = intercom_device_info(
+            contract,
+            intercom,
+            hub_device_id=entry.runtime_data.hub_device_id,
+        )
+
+    async def async_press(self) -> None:
+        """Pick up the panel call."""
+        sip = self._entry.runtime_data.sip
+        if sip is None:
+            msg = "SIP monitor is not configured"
+            raise HomeAssistantError(msg)
+        sip.answer()

@@ -38,7 +38,7 @@ def intercom_device_info(
         "identifiers": {(DOMAIN, intercom_device_id(contract, intercom.id))},
         "name": intercom_display_name(intercom),
         "manufacturer": "Ufanet",
-        "model": "Intercom",
+        "model": "Video intercom" if intercom.cctv_number else "Intercom",
     }
     # Prefer via_device_id; never set deprecated via_device (raises on modern HA).
     if hub_device_id and supports_via_device_id():
@@ -87,3 +87,13 @@ def camera_label(cam: CameraInfo) -> str:
 def cameras_by_number(cameras: list[CameraInfo]) -> dict[str, CameraInfo]:
     """Index cameras by their number string."""
     return {str(cam.number): cam for cam in cameras}
+
+
+def live_stream_url(domain: str, number: str, token: str) -> str:
+    """RTSP URL that includes the intercom microphone (Flussonic track a1)."""
+    return f"rtsp://{domain}/{number}?token={token}&tracks=v1a1"
+
+
+def whep_url(domain: str, number: str, token: str) -> str:
+    """WebRTC playback URL for the same video and microphone tracks."""
+    return f"https://{domain}/{number}/whep?token={token}&tracks=v1a1"

@@ -1,5 +1,5 @@
 {
-    "name": "Ufanet Intercom",
+    "name": "Уфанет Видеодомофон",
     "homeassistant": "2025.2.4",
     "hacs": "2.0.5",
     "country": ["RU"]

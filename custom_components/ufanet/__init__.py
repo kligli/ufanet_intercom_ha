@@ -1,4 +1,4 @@
-"""The Ufanet Intercom integration."""
+"""The Ufanet video intercom integration."""
 
 from __future__ import annotations
 
@@ -10,6 +10,7 @@ from homeassistant.const import Platform
 from homeassistant.exceptions import ConfigEntryAuthFailed, ConfigEntryNotReady
 from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
+from homeassistant.helpers.dispatcher import async_dispatcher_send
 from homeassistant.helpers.storage import Store
 
 from .api import (
@@ -28,12 +29,20 @@ from .const import (
     CONF_CONTRACT,
     CONF_DOM_URL,
     CONF_REFRESH_TOKEN,
+    CONF_SIP_HOST,
+    CONF_SIP_PORT,
+    CONF_SIP_USERNAME,
     DEFAULT_DOM_URL,
+    DEFAULT_SIP_HOST,
+    DEFAULT_SIP_PORT,
     DOMAIN,
     STORAGE_KEY,
     STORAGE_VERSION,
 )
+from .coordinator import UfanetCallCoordinator
 from .helpers import default_camera_map, resolve_camera_map
+from .sip import SipMonitor
+from .visit import async_announce_visit, ensure_blueprint
 
 if TYPE_CHECKING:
     from homeassistant.config_entries import ConfigEntry
@@ -41,7 +50,13 @@ if TYPE_CHECKING:
 
 _LOGGER = logging.getLogger(__name__)
 
-PLATFORMS: list[Platform] = [Platform.BUTTON, Platform.CAMERA]
+PLATFORMS: list[Platform] = [
+    Platform.BINARY_SENSOR,
+    Platform.BUTTON,
+    Platform.CAMERA,
+    Platform.EVENT,
+    Platform.SENSOR,
+]
 
 type UfanetConfigEntry = ConfigEntry[UfanetRuntimeData]
 
@@ -56,7 +71,11 @@ class UfanetRuntimeData:
     intercoms: list[IntercomInfo]
     cameras: list[CameraInfo]
     camera_map: dict[str, str]
+    coordinator: UfanetCallCoordinator
     hub_device_id: str | None = None
+    sip: object | None = None
+    last_visit: float = 0.0
+    last_visit_key: str = ""
 
 
 async def _save_tokens(
@@ -150,8 +169,10 @@ async def async_migrate_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     return True
 
 
-async def async_setup_entry(hass: HomeAssistant, entry: UfanetConfigEntry) -> bool:
-    """Set up Ufanet Intercom from a config entry."""
+async def async_setup_entry(  # noqa: PLR0915
+    hass: HomeAssistant, entry: UfanetConfigEntry
+) -> bool:
+    """Set up the Ufanet video intercom from a config entry."""
     contract = entry.data.get(CONF_CONTRACT)
     if not contract:
         msg = "Missing contract number"
@@ -218,6 +239,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: UfanetConfigEntry) -> bo
         )
 
     camera_map = resolve_camera_map(entry, intercoms)
+    coordinator = UfanetCallCoordinator(hass, entry, client)
+    await coordinator.async_refresh()
+    if not coordinator.last_update_success:
+        _LOGGER.warning(
+            "Ufanet call history unavailable, doorbell starts when it recovers: %s",
+            coordinator.last_exception,
+        )
 
     # Account hub device; intercom devices attach via via_device_id.
     device_registry = dr.async_get(hass)
@@ -226,9 +254,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: UfanetConfigEntry) -> bo
         identifiers={(DOMAIN, contract)},
         manufacturer="Ufanet",
         name=f"Ufanet {contract}",
-        model="Intercom account",
+        model="Video intercom account",
     )
 
+    sip = await _start_sip(hass, entry, credentials)
     entry.runtime_data = UfanetRuntimeData(
         client=client,
         store=store,
@@ -236,10 +265,19 @@ async def async_setup_entry(hass: HomeAssistant, entry: UfanetConfigEntry) -> bo
         intercoms=intercoms,
         cameras=cameras,
         camera_map=camera_map,
+        coordinator=coordinator,
         hub_device_id=hub_device.id,
+        sip=sip,
     )
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     entry.async_on_unload(entry.add_update_listener(_async_reload_entry))
+    await hass.async_add_executor_job(ensure_blueprint, hass)
+
+    def _on_history() -> None:
+        if entry.runtime_data.coordinator.snapshot.fresh:
+            async_announce_visit(hass, entry, "history")
+
+    entry.async_on_unload(coordinator.async_add_listener(_on_history))
     return True
 
 
@@ -250,7 +288,39 @@ async def _async_reload_entry(hass: HomeAssistant, entry: UfanetConfigEntry) -> 
 
 async def async_unload_entry(hass: HomeAssistant, entry: UfanetConfigEntry) -> bool:
     """Unload a config entry."""
+    sip = getattr(entry, "runtime_data", None)
+    monitor = getattr(sip, "sip", None) if sip else None
+    if isinstance(monitor, SipMonitor):
+        await monitor.stop()
     return await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
+
+
+async def _start_sip(
+    hass: HomeAssistant, entry: UfanetConfigEntry, credentials: dict
+) -> SipMonitor | None:
+    """Register the SIP monitor when the app credentials are saved."""
+    username = entry.options.get(CONF_SIP_USERNAME) or ""
+    password = credentials.get("sip_password") or ""
+    if not username or not password:
+        return None
+    host = str(entry.options.get(CONF_SIP_HOST) or DEFAULT_SIP_HOST)
+    port = int(entry.options.get(CONF_SIP_PORT) or DEFAULT_SIP_PORT)
+
+    def on_ring() -> None:
+        async_dispatcher_send(hass, f"{DOMAIN}_sip_{entry.entry_id}", "ring")
+        async_announce_visit(hass, entry, "sip")
+
+    def on_idle() -> None:
+        async_dispatcher_send(hass, f"{DOMAIN}_sip_{entry.entry_id}", "idle")
+
+    monitor = SipMonitor(str(username), str(password), host, port, on_ring, on_idle)
+    try:
+        await monitor.start()
+    except Exception:  # noqa: BLE001
+        _LOGGER.warning("SIP monitor did not start", exc_info=True)
+        return None
+    _LOGGER.info("SIP monitor %s registering at %s:%s", username, host, port)
+    return monitor
 
 
 async def async_remove_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:

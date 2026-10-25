@@ -1,9 +1,9 @@
 {
-  "title": "Ufanet Intercom",
+  "title": "Ufanet Video Intercom",
   "config": {
     "step": {
       "user": {
-        "title": "Ufanet Intercom: sign-in method",
+        "title": "Ufanet Video Intercom: sign-in method",
         "menu_options": {
           "password": "Contract number + password",
           "phone": "Phone call (no password)"
@@ -71,9 +71,19 @@
   },
   "options": {
     "step": {
+      "sip": {
+        "title": "SIP monitor",
+        "description": "Take the login and password from the Ufanet app: intercom, settings, SIP monitors, Connect a monitor. Set the server address and port here. An empty server means 81.30.201.150, an empty port means 5401. An empty login leaves the monitor off. With a login, Home Assistant answers the call and that login is in use.",
+        "data": {
+          "sip_username": "SIP login",
+          "sip_password": "SIP password",
+          "sip_host": "SIP server",
+          "sip_port": "SIP port"
+        }
+      },
       "assign": {
         "title": "Intercom camera ({progress})",
-        "description": "Choose the camera for **{intercom}**. Leave empty (—) for no camera. Default comes from Dom API `cctv_number`.",
+        "description": "Camera for **{intercom}**. Choose — to leave the panel without video. The suggested value is the camera your Ufanet account already links to this panel.",
         "data": {
           "camera_map": "Camera"
         }
@@ -89,11 +99,36 @@
     "button": {
       "open_intercom": {
         "name": "Open door"
+      },
+      "answer_sip": {
+        "name": "Answer"
       }
     },
     "camera": {
       "camera": {
         "name": "Camera"
+      }
+    },
+    "event": {
+      "doorbell": {
+        "name": "Doorbell",
+        "state_attributes": {
+          "event_type": {
+            "state": {
+              "ring": "Ring"
+            }
+          }
+        }
+      }
+    },
+    "binary_sensor": {
+      "ringing": {
+        "name": "Ringing"
+      }
+    },
+    "sensor": {
+      "last_call": {
+        "name": "Last call"
       }
     }
   }

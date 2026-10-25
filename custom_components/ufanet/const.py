@@ -25,5 +25,12 @@ PHONE_COUNTRY_ID = 1
 
 DEFAULT_DOM_URL = "https://dom.ufanet.ru/"
 
+CONF_SIP_USERNAME = "sip_username"
+CONF_SIP_PASSWORD = "sip_password"
+CONF_SIP_HOST = "sip_host"
+CONF_SIP_PORT = "sip_port"
+DEFAULT_SIP_HOST = "81.30.201.150"
+DEFAULT_SIP_PORT = 5401
+
 STORAGE_KEY = f"{DOMAIN}_credentials"
 STORAGE_VERSION = 1

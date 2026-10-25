@@ -128,6 +128,14 @@ def test_resolve_camera_map_options_override_and_clear() -> None:
     assert resolve_camera_map(entry, intercoms) == {"1": "999"}
 
 
+def test_live_stream_includes_microphone_track() -> None:
+    """The panel microphone is Flussonic audio track a1."""
+    assert helpers.live_stream_url("cam.example", "42", "tok") == (
+        "rtsp://cam.example/42?token=tok&tracks=v1a1"
+    )
+    assert "tracks=v1a1" in helpers.whep_url("cam.example", "42", "tok")
+
+
 def test_camera_and_device_helpers() -> None:
     """Labels, indexing, and via_device_id DeviceInfo wiring."""
     cam = CameraInfo(
@@ -172,6 +180,7 @@ def test_intercom_device_info_omits_via_on_old_ha() -> None:
 
 
 if __name__ == "__main__":
+    test_live_stream_includes_microphone_track()
     test_default_camera_map_from_cctv_number()
     test_resolve_camera_map_options_override_and_clear()
     test_camera_and_device_helpers()

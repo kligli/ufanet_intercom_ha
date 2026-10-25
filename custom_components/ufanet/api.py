@@ -22,6 +22,7 @@ from urllib.parse import urljoin
 
 from aiohttp import ClientResponseError, ClientSession
 
+from .calls import CALL_HISTORY_PAGE_SIZE, CallRecord, panel_name, parse_call_history
 from .const import (
     DEFAULT_DOM_URL,
     PHONE_APPLICATION_ID,
@@ -165,12 +166,13 @@ class IntercomInfo:
 
 
 def intercom_display_name(intercom: IntercomInfo) -> str:
-    """Return a display name for an intercom entity."""
-    return (
-        intercom.role_name
-        or intercom.string_view
-        or intercom.custom_name
-        or f"Intercom {intercom.id}"
+    """Return the street address, not a generic role such as Intercom."""
+    return panel_name(
+        intercom.custom_name,
+        intercom.string_view,
+        intercom.address if isinstance(intercom.address, str) else None,
+        intercom.role_name,
+        intercom.id,
     )
 
 
@@ -316,6 +318,23 @@ class UfanetApiClient:
                 )
             )
         return cameras
+
+    async def async_get_call_history(
+        self, *, page_size: int = CALL_HISTORY_PAGE_SIZE
+    ) -> list[CallRecord]:
+        """Return the newest page of intercom calls."""
+        await self._ensure_access_token()
+        params = {"page": 1, "page_size": page_size}
+        try:
+            data = await self._request(
+                "GET", "api/v1/skuds/call-history/", params=params
+            )
+        except UfanetApiAuthError:
+            await self._login()
+            data = await self._request(
+                "GET", "api/v1/skuds/call-history/", params=params
+            )
+        return parse_call_history(data)
 
     async def _login(self) -> None:
         """Full login to obtain access and refresh tokens (requires password)."""

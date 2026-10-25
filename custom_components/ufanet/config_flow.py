@@ -38,7 +38,13 @@ from .const import (
     CONF_DOM_URL,
     CONF_PASSWORD,
     CONF_PHONE,
+    CONF_SIP_HOST,
+    CONF_SIP_PASSWORD,
+    CONF_SIP_PORT,
+    CONF_SIP_USERNAME,
     DEFAULT_DOM_URL,
+    DEFAULT_SIP_HOST,
+    DEFAULT_SIP_PORT,
     DOMAIN,
     NONE_CAMERA,
     STORAGE_KEY,
@@ -542,6 +548,16 @@ class UfanetIntercomConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         )
 
 
+async def _save_sip_password(hass: Any, contract: str, password: str) -> None:
+    """Keep the SIP monitor password next to the other credentials."""
+    store = Store(hass, STORAGE_VERSION, STORAGE_KEY)
+    stored = await store.async_load() or {}
+    creds = dict(stored.get(contract) or {})
+    creds["sip_password"] = password
+    stored[contract] = creds
+    await store.async_save(stored)
+
+
 async def _client_from_entry(hass: Any, entry: ConfigEntry) -> UfanetApiClient:
     """Rebuild an API client from Store credentials for options/reconfigure."""
     contract = str(entry.data[CONF_CONTRACT])
@@ -570,6 +586,7 @@ class UfanetOptionsFlowHandler(config_entries.OptionsFlow):
         self._intercoms: list[Any] = []
         self._camera_choices: dict[str, str] = {}
         self._pending_map: dict[str, str] = {}
+        self._sip: dict[str, Any] = {}
         self._index = 0
 
     async def async_step_init(
@@ -597,7 +614,62 @@ class UfanetOptionsFlowHandler(config_entries.OptionsFlow):
 
         self._pending_map = dict(resolve_camera_map(entry, self._intercoms))
         self._index = 0
-        return await self.async_step_assign()
+        return await self.async_step_sip()
+
+    async def async_step_sip(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Save the SIP monitor account from the Ufanet app."""
+        entry = self.config_entry
+        if user_input is not None:
+            password = user_input.get(CONF_SIP_PASSWORD) or ""
+            if password:
+                await _save_sip_password(
+                    self.hass, str(entry.data[CONF_CONTRACT]), str(password)
+                )
+            host = user_input.get(CONF_SIP_HOST) or DEFAULT_SIP_HOST
+            self._sip = {
+                CONF_SIP_USERNAME: (user_input.get(CONF_SIP_USERNAME) or "").strip(),
+                CONF_SIP_HOST: str(host).strip(),
+                CONF_SIP_PORT: int(user_input.get(CONF_SIP_PORT) or DEFAULT_SIP_PORT),
+            }
+            return await self.async_step_assign()
+
+        options = entry.options
+        return self.async_show_form(
+            step_id="sip",
+            data_schema=vol.Schema(
+                {
+                    vol.Optional(
+                        CONF_SIP_USERNAME,
+                        description={
+                            "suggested_value": options.get(CONF_SIP_USERNAME, "")
+                        },
+                    ): str,
+                    vol.Optional(CONF_SIP_PASSWORD): selector.TextSelector(
+                        selector.TextSelectorConfig(
+                            type=selector.TextSelectorType.PASSWORD
+                        )
+                    ),
+                    vol.Optional(
+                        CONF_SIP_HOST,
+                        description={
+                            "suggested_value": options.get(
+                                CONF_SIP_HOST, DEFAULT_SIP_HOST
+                            )
+                        },
+                    ): str,
+                    vol.Optional(
+                        CONF_SIP_PORT,
+                        description={
+                            "suggested_value": options.get(
+                                CONF_SIP_PORT, DEFAULT_SIP_PORT
+                            )
+                        },
+                    ): int,
+                }
+            ),
+        )
 
     async def async_step_assign(
         self, user_input: dict[str, Any] | None = None
@@ -619,6 +691,7 @@ class UfanetOptionsFlowHandler(config_entries.OptionsFlow):
                     title="",
                     data={
                         **self.config_entry.options,
+                        **getattr(self, "_sip", {}),
                         CONF_CAMERA_MAP: self._pending_map,
                     },
                 )

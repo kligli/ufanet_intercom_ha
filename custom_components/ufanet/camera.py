@@ -14,7 +14,7 @@ from homeassistant.components.camera import Camera, CameraEntityFeature
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
 from .api import UfanetApiAuthError, UfanetApiError
-from .helpers import cameras_by_number, intercom_device_info
+from .helpers import cameras_by_number, intercom_device_info, live_stream_url
 
 if TYPE_CHECKING:
     from homeassistant.core import HomeAssistant
@@ -92,8 +92,8 @@ class UfanetCamera(Camera):
 
     def _update_urls(self) -> None:
         """Update stream and screenshot URLs based on current camera info."""
-        self._stream_url = (
-            f"rtsp://{self._cam.domain}/{self._cam.number}?token={self._cam.token_l}"
+        self._stream_url = live_stream_url(
+            self._cam.domain, str(self._cam.number), self._cam.token_l
         )
         if self._cam.screenshot_domain:
             self._screenshot_url = (
