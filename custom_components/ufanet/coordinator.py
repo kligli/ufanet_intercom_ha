@@ -81,9 +81,7 @@ class UfanetCallCoordinator(DataUpdateCoordinator[list[CallRecord]]):
         if not self.snapshot.active_rings:
             return
         expiry = min(self.snapshot.active_rings.values()) + RING_WINDOW
-        delay = (expiry - now).total_seconds()
-        if delay <= 0:
-            return
+        delay = max((expiry - now).total_seconds(), 0)
         self._ring_unsub = async_call_later(self.hass, delay, self._on_ring_window_end)
 
     @callback

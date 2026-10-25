@@ -69,6 +69,49 @@ def test_single_camera_links_to_the_only_panel() -> None:
     assert linked == {9: "555"}
 
 
+def test_naive_called_at_uses_the_panel_timezone() -> None:
+    """Wall time without an offset belongs to the panel, not UTC."""
+    moment = calls.parse_called_at("2026-10-25T18:06:00", "Asia/Yekaterinburg")
+    assert moment == datetime(2026, 10, 25, 13, 6, tzinfo=UTC)
+
+
+def test_history_row_reads_numeric_panel_offset() -> None:
+    """A +05:00 timezone shifts a naive called_at back to UTC."""
+    rows = calls.parse_call_history(
+        {
+            "results": [
+                {
+                    "uuid": "u",
+                    "camera_number": "55",
+                    "called_at": "2026-10-25T18:06:00",
+                    "timezone": "+05:00",
+                }
+            ]
+        }
+    )
+    assert rows[0].called_at == datetime(2026, 10, 25, 13, 6, tzinfo=UTC)
+
+
+def test_call_older_than_the_ring_window_does_not_ring() -> None:
+    """A late history row updates the last call and leaves the bell idle."""
+    now = datetime(2026, 10, 25, 13, 0, tzinfo=UTC)
+    seeded = calls.apply_history_update(calls.HistorySnapshot(), [], now)
+    updated = calls.apply_history_update(
+        seeded,
+        [
+            calls.CallRecord(
+                uuid="late",
+                called_at=now - timedelta(seconds=90),
+                camera_number="55",
+            )
+        ],
+        now,
+    )
+    assert updated.fresh == []
+    assert updated.active_rings == {}
+    assert updated.last_calls["55"].uuid == "late"
+
+
 def test_new_call_rings_and_startup_history_does_not() -> None:
     """The first poll is silent. A later new uuid rings."""
     now = datetime(2026, 10, 24, 13, 0, tzinfo=UTC)

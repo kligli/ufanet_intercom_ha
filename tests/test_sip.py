@@ -25,6 +25,11 @@ def _load_sip() -> ModuleType:
 sip = _load_sip()
 
 
+def test_register_refresh_happens_before_expiry() -> None:
+    """The monitor refreshes while the server still holds the binding."""
+    assert sip.REGISTER_INTERVAL < sip.REGISTER_EXPIRES
+
+
 def test_digest_matches_rfc2617_example_shape() -> None:
     """The response hash is stable for a known challenge."""
     response = sip.digest_response(

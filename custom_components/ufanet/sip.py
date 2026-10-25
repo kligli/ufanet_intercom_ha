@@ -20,6 +20,9 @@ _LOGGER = logging.getLogger(__name__)
 _PT_PCMA = 8
 _FRAME = 160
 ALAW_SILENCE = bytes([0xD5]) * _FRAME
+# Ufanet drops a monitor that misses the 30 s registration window.
+REGISTER_EXPIRES = 30
+REGISTER_INTERVAL = 15
 
 
 def md5_hex(text: str) -> str:
@@ -196,6 +199,7 @@ class SipMonitor:
         self._rtp_task: asyncio.Task[None] | None = None
         self._invite: tuple[str, dict[str, str], str] | None = None
         self._answered = False
+        self._authorization: str | None = None
 
     async def start(self) -> None:
         """Open sockets and keep the registration alive."""
@@ -248,10 +252,10 @@ class SipMonitor:
     async def _register_loop(self) -> None:
         while True:
             try:
-                self._send_register(auth=None)
+                self._send_register(self._authorization)
             except Exception:  # noqa: BLE001
                 _LOGGER.debug("SIP register send failed", exc_info=True)
-            await asyncio.sleep(25)
+            await asyncio.sleep(REGISTER_INTERVAL)
 
     def _send_register(self, auth: str | None) -> None:
         uri = f"sip:{self.host}"
@@ -264,7 +268,7 @@ class SipMonitor:
             f"Call-ID: {self._call_id}",
             f"CSeq: {self._cseq} REGISTER",
             f"Contact: <sip:{self.username}@{contact_host}:{self._public_port}>",
-            "Expires: 30",
+            f"Expires: {REGISTER_EXPIRES}",
             "Max-Forwards: 70",
             "User-Agent: HomeAssistant-Ufanet",
         ]
@@ -318,6 +322,7 @@ class SipMonitor:
                 f'Authorization: Digest username="{self.username}", realm="{realm}", '
                 f'nonce="{nonce}", uri="{uri}", response="{response}", algorithm=MD5'
             )
+            self._authorization = auth
             self._send_register(auth)
             return
         if " 200 " in start and "REGISTER" in headers.get("cseq", "").upper():

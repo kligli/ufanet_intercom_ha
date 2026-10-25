@@ -9,8 +9,9 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime, timedelta, timezone
 from typing import Any
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 CALL_HISTORY_INTERVAL = timedelta(seconds=15)
 CALL_HISTORY_PAGE_SIZE = 25
@@ -61,8 +62,32 @@ def _as_optional_str(value: Any) -> str | None:
     return text or None
 
 
-def parse_called_at(value: Any) -> datetime | None:
-    """Parse a call timestamp into aware UTC."""
+_OFFSET_TEXT = re.compile(r"^(?:UTC|GMT)?([+-])(\d{1,2})(?::?(\d{2}))?$", re.IGNORECASE)
+
+
+def _zone_from_name(name: Any) -> timezone | ZoneInfo | None:
+    """Return a tzinfo for a panel timezone name or numeric offset."""
+    text = _as_optional_str(name)
+    if text is None:
+        return None
+    offset = _OFFSET_TEXT.fullmatch(text.strip())
+    if offset:
+        sign = 1 if offset.group(1) == "+" else -1
+        hours = int(offset.group(2))
+        minutes = int(offset.group(3) or 0)
+        return timezone(sign * timedelta(hours=hours, minutes=minutes))
+    try:
+        return ZoneInfo(text.strip())
+    except (ZoneInfoNotFoundError, ValueError):
+        return None
+
+
+def parse_called_at(value: Any, timezone_name: Any = None) -> datetime | None:
+    """Parse a call timestamp into aware UTC.
+
+    A timestamp that already carries an offset is used as-is. A naive
+    timestamp is read in the panel timezone from the same history row.
+    """
     if isinstance(value, datetime):
         moment = value
     elif isinstance(value, (int, float)):
@@ -84,7 +109,7 @@ def parse_called_at(value: Any) -> datetime | None:
         return None
 
     if moment.tzinfo is None:
-        moment = moment.replace(tzinfo=UTC)
+        moment = moment.replace(tzinfo=_zone_from_name(timezone_name) or UTC)
     return moment.astimezone(UTC)
 
 
@@ -103,7 +128,7 @@ def parse_call_history(payload: Any) -> list[CallRecord]:
             continue
         uuid = _as_optional_str(item.get("uuid"))
         camera_number = normalize_camera_number(item.get("camera_number"))
-        called_at = parse_called_at(item.get("called_at"))
+        called_at = parse_called_at(item.get("called_at"), item.get("timezone"))
         if not uuid or not camera_number or called_at is None:
             continue
         records.append(
@@ -177,7 +202,7 @@ def apply_history_update(
             continue
         seen.add(call.uuid)
         age = now - call.called_at
-        if age > stale_after or age < -_FUTURE_SKEW:
+        if age > stale_after or age < -_FUTURE_SKEW or age > ring_window:
             continue
         fresh.append(call)
         active[call.camera_number] = call.called_at
