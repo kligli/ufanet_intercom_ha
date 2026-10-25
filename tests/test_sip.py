@@ -27,6 +27,7 @@ sip = _load_sip()
 
 def test_register_refresh_happens_before_expiry() -> None:
     """The monitor refreshes while the server still holds the binding."""
+    assert sip.REGISTER_INTERVAL == 10
     assert sip.REGISTER_INTERVAL < sip.REGISTER_EXPIRES
 
 

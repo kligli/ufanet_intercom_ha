@@ -22,7 +22,7 @@ _FRAME = 160
 ALAW_SILENCE = bytes([0xD5]) * _FRAME
 # Ufanet drops a monitor that misses the 30 s registration window.
 REGISTER_EXPIRES = 30
-REGISTER_INTERVAL = 15
+REGISTER_INTERVAL = 10
 
 
 def md5_hex(text: str) -> str:

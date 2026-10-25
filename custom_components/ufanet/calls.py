@@ -13,7 +13,7 @@ from datetime import UTC, datetime, timedelta, timezone
 from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-CALL_HISTORY_INTERVAL = timedelta(seconds=15)
+CALL_HISTORY_INTERVAL = timedelta(seconds=5)
 CALL_HISTORY_PAGE_SIZE = 25
 # A row this old is backlog after downtime, not someone at the door now.
 STALE_CALL_AGE = timedelta(minutes=5)

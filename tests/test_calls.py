@@ -69,6 +69,11 @@ def test_single_camera_links_to_the_only_panel() -> None:
     assert linked == {9: "555"}
 
 
+def test_history_poll_stays_short_enough_for_a_doorbell() -> None:
+    """A ring from call history should show up within a few seconds."""
+    assert timedelta(seconds=5) == calls.CALL_HISTORY_INTERVAL
+
+
 def test_naive_called_at_uses_the_panel_timezone() -> None:
     """Wall time without an offset belongs to the panel, not UTC."""
     moment = calls.parse_called_at("2026-10-25T18:06:00", "Asia/Yekaterinburg")
