@@ -60,6 +60,34 @@ def test_visit_narrows_to_the_camera_that_rang() -> None:
     assert calls.visit_panel_ids(panels, fresh) == [2]
 
 
+def test_same_street_keeps_each_house_with_its_camera() -> None:
+    """13/7 must not take the camera of 21/3 just because the street matches."""
+    linked = calls.link_cameras(
+        [
+            {"id": 1, "cctv_number": None, "label": "Мушникова, 13/7, п.1"},
+            {"id": 2, "cctv_number": None, "label": "Мушникова, 21/3, п.3"},
+        ],
+        [
+            {"number": "a", "label": "Мушникова 21/3"},
+            {"number": "b", "label": "Мушникова 13/7"},
+        ],
+    )
+    assert linked == {1: "b", 2: "a"}
+
+
+def test_camera_list_puts_this_house_first() -> None:
+    """A taken camera of another house sinks below the matching building."""
+    ordered = calls.order_cameras_for_address(
+        "Мушникова, 13/7, п.1",
+        [
+            {"number": "a", "label": "Мушникова 21/3"},
+            {"number": "b", "label": "Мушникова 13/7"},
+        ],
+        {"a"},
+    )
+    assert [number for number, _label in ordered] == ["b", "a"]
+
+
 def test_single_camera_links_to_the_only_panel() -> None:
     """One panel and one camera are the same door."""
     linked = calls.link_cameras(

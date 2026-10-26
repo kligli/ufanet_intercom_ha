@@ -81,13 +81,23 @@
           "sip_port": "SIP port"
         }
       },
+      "addresses": {
+        "title": "Addresses",
+        "description": "This account has several addresses. Choose the doors that should appear in Home Assistant. The next step picks a camera for each one, with cameras of the same building listed first.",
+        "data": {
+          "enabled_panels": "Addresses"
+        }
+      },
       "assign": {
-        "title": "Intercom camera ({progress})",
-        "description": "Camera for **{intercom}**. Choose — to leave the panel without video. The suggested value is the camera your Ufanet account already links to this panel.",
+        "title": "Camera for address ({progress})",
+        "description": "Address **{intercom}**, building {house}. Cameras of this building are listed first. Cameras already used by another address are listed last. Choose — for no video.",
         "data": {
           "camera_map": "Camera"
         }
       }
+    },
+    "error": {
+      "no_address": "Choose at least one address."
     },
     "abort": {
       "auth": "Session expired. Reauthenticate the integration first.",

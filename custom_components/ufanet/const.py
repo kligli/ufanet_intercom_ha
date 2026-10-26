@@ -14,6 +14,8 @@ CONF_ACCESS_TOKEN = "access_token"
 CONF_REFRESH_TOKEN = "refresh_token"
 CONF_DOM_URL = "dom_url"
 CONF_CAMERA_MAP = "camera_map"
+# Intercom ids the user kept. Missing means every address from the account.
+CONF_ENABLED_PANELS = "enabled_panels"
 AUTH_PASSWORD = "password"
 AUTH_PHONE = "phone"
 

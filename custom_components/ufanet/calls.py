@@ -293,8 +293,42 @@ def label_tokens(text: str | None) -> set[str]:
     }
 
 
+_HOUSE_NUMBER = re.compile(r"\d+(?:/\d+)?")
+
+
+def primary_house(text: str | None) -> str | None:
+    """Return the building number, preferring 13/7 over a porch digit."""
+    numbers = _HOUSE_NUMBER.findall(text or "")
+    slashed = [number for number in numbers if "/" in number]
+    if slashed:
+        return slashed[0]
+    long = [number for number in numbers if len(number) >= 2]
+    if long:
+        return long[0]
+    return numbers[0] if numbers else None
+
+
+def same_house(left: str | None, right: str | None) -> bool:
+    """Return True when two labels name the same building.
+
+    13 and 13/7 are the same house. 13/7 and 21/3 are not, even on one street.
+    A porch digit such as 1 does not count once a longer house number exists.
+    """
+    first = primary_house(left)
+    second = primary_house(right)
+    if not first or not second:
+        return False
+    if first == second:
+        return True
+    return first.split("/", 1)[0] == second.split("/", 1)[0] and (
+        "/" not in first or "/" not in second
+    )
+
+
 def label_score(left: str | None, right: str | None) -> int:
     """Score two addresses. A street plus a house number is a real match."""
+    if primary_house(left) and primary_house(right) and not same_house(left, right):
+        return 0
     common = label_tokens(left) & label_tokens(right)
     if not common:
         return 0
@@ -348,6 +382,26 @@ def link_cameras(
     ):
         assigned[int(intercoms[0]["id"])] = str(cameras[0]["number"])
     return assigned
+
+
+def order_cameras_for_address(
+    address: str, cameras: list[dict[str, str]], taken: set[str]
+) -> list[tuple[str, str]]:
+    """List cameras with this building first and cameras used elsewhere last."""
+    ranked: list[tuple[tuple[int, int], str, str]] = []
+    for camera in cameras:
+        number = str(camera["number"])
+        label = str(camera["label"])
+        if number in taken:
+            rank = (-1, 0)
+        else:
+            rank = (
+                1 if same_house(address, label) else 0,
+                label_score(address, label),
+            )
+        ranked.append((rank, label, number))
+    ranked.sort(key=lambda item: item[0], reverse=True)
+    return [(number, label) for _rank, label, number in ranked]
 
 
 def visit_panel_ids(

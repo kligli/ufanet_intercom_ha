@@ -28,6 +28,7 @@ from .const import (
     CONF_CAMERA_MAP,
     CONF_CONTRACT,
     CONF_DOM_URL,
+    CONF_ENABLED_PANELS,
     CONF_REFRESH_TOKEN,
     CONF_SIP_HOST,
     CONF_SIP_PORT,
@@ -40,7 +41,12 @@ from .const import (
     STORAGE_VERSION,
 )
 from .coordinator import UfanetCallCoordinator
-from .helpers import default_camera_map, resolve_camera_map
+from .helpers import (
+    default_camera_map,
+    filter_enabled_intercoms,
+    intercom_device_id,
+    resolve_camera_map,
+)
 from .sip import SipMonitor
 from .visit import async_announce_visit, ensure_blueprint
 
@@ -228,6 +234,10 @@ async def async_setup_entry(  # noqa: PLR0915
         msg = "No intercoms available for this account"
         raise ConfigEntryNotReady(msg)
 
+    intercoms = filter_enabled_intercoms(
+        intercoms, entry.options.get(CONF_ENABLED_PANELS)
+    )
+
     # Seed options with API defaults once, so the UI shows current links.
     if CONF_CAMERA_MAP not in entry.options:
         hass.config_entries.async_update_entry(
@@ -256,6 +266,12 @@ async def async_setup_entry(  # noqa: PLR0915
         name=f"Ufanet {contract}",
         model="Video intercom account",
     )
+    live_identifiers = {intercom_device_id(contract, item.id) for item in intercoms}
+    live_identifiers.add(contract)
+    for device in dr.async_entries_for_config_entry(device_registry, entry.entry_id):
+        own = {ident for domain, ident in device.identifiers if domain == DOMAIN}
+        if own and own.isdisjoint(live_identifiers):
+            device_registry.async_remove_device(device.id)
 
     sip = await _start_sip(hass, entry, credentials)
     entry.runtime_data = UfanetRuntimeData(

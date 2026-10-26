@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from homeassistant.helpers.entity import DeviceInfo
 
@@ -46,6 +46,21 @@ def intercom_device_info(
     if intercom.address:
         kwargs["suggested_area"] = intercom.address
     return DeviceInfo(**kwargs)
+
+
+def filter_enabled_intercoms(
+    intercoms: list[IntercomInfo], enabled_ids: list[Any] | None
+) -> list[IntercomInfo]:
+    """Keep the addresses the user chose.
+
+    A missing list means the whole account. A saved list that matches nothing
+    current falls back to every address so a renamed id cannot hide all doors.
+    """
+    if not enabled_ids:
+        return list(intercoms)
+    allow = {str(item) for item in enabled_ids}
+    chosen = [intercom for intercom in intercoms if str(intercom.id) in allow]
+    return chosen or list(intercoms)
 
 
 def default_camera_map(intercoms: list[IntercomInfo]) -> dict[str, str]:
