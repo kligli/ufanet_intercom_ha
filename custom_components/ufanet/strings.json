@@ -43,6 +43,18 @@
           "password": "Password"
         }
       },
+      "setup": {
+        "title": "Addresses and SIP",
+        "description": "Tick the doors from this account. Clear an address here, or delete its device on the integration page: it will not come back. SIP can be filled in now. The checkbox opens this window the next time you press Configure.",
+        "data": {
+          "enabled_panels": "Addresses",
+          "sip_username": "SIP login",
+          "sip_password": "SIP password",
+          "sip_host": "SIP server",
+          "sip_port": "SIP port",
+          "show_setup_again": "Show this window the next time settings are opened"
+        }
+      },
       "reauth_phone": {
         "title": "Reauthenticate by phone",
         "description": "Session expired. Sign in again with a confirmation call.",
@@ -71,28 +83,23 @@
   },
   "options": {
     "step": {
-      "sip": {
-        "title": "SIP monitor",
-        "description": "Take the login and password from the Ufanet app: intercom, settings, SIP monitors, Connect a monitor. Set the server address and port here. An empty server means 81.30.201.150, an empty port means 5401. An empty login leaves the monitor off. With a login, Home Assistant answers the call and that login is in use.",
+      "gate": {
+        "title": "Settings",
+        "description": "The address and SIP window is closed. Tick the box to open it.",
         "data": {
+          "show_setup_again": "Show the address and SIP window"
+        }
+      },
+      "setup": {
+        "title": "Addresses and SIP",
+        "description": "Tick the doors from this account. Clear an address here, or delete its device on the integration page: it will not come back. An empty SIP login leaves the monitor off. The checkbox opens this window again from Configure.",
+        "data": {
+          "enabled_panels": "Addresses",
           "sip_username": "SIP login",
           "sip_password": "SIP password",
           "sip_host": "SIP server",
-          "sip_port": "SIP port"
-        }
-      },
-      "addresses": {
-        "title": "Addresses",
-        "description": "This account has several addresses. Choose the doors that should appear in Home Assistant. The next step picks a camera for each one, with cameras of the same building listed first.",
-        "data": {
-          "enabled_panels": "Addresses"
-        }
-      },
-      "assign": {
-        "title": "Camera for address ({progress})",
-        "description": "Address **{intercom}**, building {house}. Cameras of this building are listed first. Cameras already used by another address are listed last. Choose — for no video.",
-        "data": {
-          "camera_map": "Camera"
+          "sip_port": "SIP port",
+          "show_setup_again": "Show this window the next time settings are opened"
         }
       }
     },

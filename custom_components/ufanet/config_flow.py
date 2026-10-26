@@ -28,7 +28,6 @@ from .api import (
     phone_auth_contact_list,
     phone_auth_init,
 )
-from .calls import order_cameras_for_address, primary_house
 from .const import (
     AUTH_PASSWORD,
     AUTH_PHONE,
@@ -36,10 +35,12 @@ from .const import (
     CONF_CAMERA_MAP,
     CONF_CONTRACT,
     CONF_CONTRACT_ID,
+    CONF_DISABLED_PANELS,
     CONF_DOM_URL,
     CONF_ENABLED_PANELS,
     CONF_PASSWORD,
     CONF_PHONE,
+    CONF_SHOW_SETUP_AGAIN,
     CONF_SIP_HOST,
     CONF_SIP_PASSWORD,
     CONF_SIP_PORT,
@@ -48,11 +49,10 @@ from .const import (
     DEFAULT_SIP_HOST,
     DEFAULT_SIP_PORT,
     DOMAIN,
-    NONE_CAMERA,
     STORAGE_KEY,
     STORAGE_VERSION,
 )
-from .helpers import camera_label, resolve_camera_map
+from .helpers import default_camera_map
 
 if TYPE_CHECKING:
     from homeassistant.config_entries import ConfigEntry
@@ -184,6 +184,9 @@ class UfanetIntercomConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         """Initialize ephemeral flow state."""
         self._phone_ctx: dict[str, Any] = {}
         self._reauth_entry: ConfigEntry | None = None
+        self._setup_intercoms: list[Any] = []
+        self._setup_data: dict[str, Any] = {}
+        self._setup_options: dict[str, Any] = {}
 
     @staticmethod
     @callback
@@ -359,15 +362,15 @@ class UfanetIntercomConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                         }
                         for intercom in intercoms
                     ]
-                    return self.async_create_entry(
-                        title=contract,
-                        data={
-                            CONF_CONTRACT: contract,
-                            CONF_AUTH_METHOD: AUTH_PASSWORD,
-                            CONF_DOM_URL: dom_url,
-                            "intercoms": intercoms_data,
-                        },
-                    )
+                    self._setup_intercoms = intercoms
+                    self._setup_data = {
+                        CONF_CONTRACT: contract,
+                        CONF_AUTH_METHOD: AUTH_PASSWORD,
+                        CONF_DOM_URL: dom_url,
+                        "intercoms": intercoms_data,
+                    }
+                    self._setup_options = {}
+                    return await self.async_step_setup()
             except UfanetApiAuthError:
                 errors["base"] = "auth"
             except UfanetApiError:
@@ -544,9 +547,21 @@ class UfanetIntercomConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         await self.async_set_unique_id(contract_id)
         self._abort_if_unique_id_configured()
 
-        return self.async_create_entry(
-            title=contract_id,
-            data=entry_data,
+        self._setup_intercoms = intercoms
+        self._setup_data = entry_data
+        self._setup_options = {}
+        return await self.async_step_setup()
+
+    async def async_step_setup(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Choose addresses and the SIP monitor before the entry is created."""
+        return await _async_finish_setup(
+            self,
+            self._setup_intercoms,
+            user_input,
+            options=self._setup_options,
+            entry_data=self._setup_data,
         )
 
 
@@ -580,203 +595,175 @@ async def _client_from_entry(hass: Any, entry: ConfigEntry) -> UfanetApiClient:
     )
 
 
-class UfanetOptionsFlowHandler(config_entries.OptionsFlow):
-    """Options flow: pick which camera belongs to each intercom."""
+def _setup_schema(
+    intercoms: list[Any],
+    *,
+    selected: list[str],
+    sip_username: str,
+    sip_host: str,
+    sip_port: int,
+    show_again: bool,
+) -> vol.Schema:
+    """One form: which doors, SIP monitor, and whether to open it again."""
+    panel_options = [
+        {"value": str(intercom.id), "label": intercom_display_name(intercom)}
+        for intercom in intercoms
+    ]
+    panels = selector.SelectSelector(
+        selector.SelectSelectorConfig(
+            options=panel_options,
+            multiple=True,
+            mode=selector.SelectSelectorMode.LIST,
+        )
+    )
+    password = selector.TextSelector(
+        selector.TextSelectorConfig(type=selector.TextSelectorType.PASSWORD)
+    )
+    return vol.Schema(
+        {
+            vol.Required(CONF_ENABLED_PANELS, default=selected): panels,
+            vol.Optional(
+                CONF_SIP_USERNAME,
+                description={"suggested_value": sip_username},
+            ): str,
+            vol.Optional(CONF_SIP_PASSWORD): password,
+            vol.Optional(
+                CONF_SIP_HOST,
+                description={"suggested_value": sip_host},
+            ): str,
+            vol.Optional(
+                CONF_SIP_PORT,
+                description={"suggested_value": sip_port},
+            ): int,
+            vol.Required(CONF_SHOW_SETUP_AGAIN, default=show_again): bool,
+        }
+    )
 
-    def __init__(self) -> None:
-        """Initialize options flow state."""
-        self._intercoms: list[Any] = []
-        self._chosen: list[Any] = []
-        self._cameras: list[dict[str, str]] = []
-        self._camera_choices: dict[str, str] = {}
-        self._pending_map: dict[str, str] = {}
-        self._sip: dict[str, Any] = {}
-        self._index = 0
+
+def _selected_panel_ids(intercoms: list[Any], user_input: dict[str, Any]) -> list[Any]:
+    selected = {str(item) for item in user_input.get(CONF_ENABLED_PANELS) or []}
+    return [intercom for intercom in intercoms if str(intercom.id) in selected]
+
+
+async def _async_finish_setup(
+    flow: Any,
+    intercoms: list[Any],
+    user_input: dict[str, Any] | None,
+    *,
+    options: dict[str, Any],
+    entry_data: dict[str, Any] | None = None,
+) -> FlowResult:
+    """Save the address and SIP form, or show it again."""
+    known = [str(intercom.id) for intercom in intercoms]
+    disabled = {str(item) for item in options.get(CONF_DISABLED_PANELS) or []}
+    saved = [str(item) for item in options.get(CONF_ENABLED_PANELS) or []]
+    if saved:
+        selected = [item for item in saved if item in known and item not in disabled]
+    else:
+        selected = [item for item in known if item not in disabled]
+    if user_input is None:
+        return flow.async_show_form(
+            step_id="setup",
+            data_schema=_setup_schema(
+                intercoms,
+                selected=selected,
+                sip_username=str(options.get(CONF_SIP_USERNAME) or ""),
+                sip_host=str(options.get(CONF_SIP_HOST) or DEFAULT_SIP_HOST),
+                sip_port=int(options.get(CONF_SIP_PORT) or DEFAULT_SIP_PORT),
+                show_again=bool(options.get(CONF_SHOW_SETUP_AGAIN, False)),
+            ),
+        )
+    chosen = _selected_panel_ids(intercoms, user_input)
+    if not chosen:
+        return flow.async_show_form(
+            step_id="setup",
+            data_schema=_setup_schema(
+                intercoms,
+                selected=[],
+                sip_username=str(user_input.get(CONF_SIP_USERNAME) or ""),
+                sip_host=str(user_input.get(CONF_SIP_HOST) or DEFAULT_SIP_HOST),
+                sip_port=int(user_input.get(CONF_SIP_PORT) or DEFAULT_SIP_PORT),
+                show_again=bool(user_input.get(CONF_SHOW_SETUP_AGAIN)),
+            ),
+            errors={"base": "no_address"},
+        )
+    password = user_input.get(CONF_SIP_PASSWORD) or ""
+    if entry_data is not None:
+        contract = str(entry_data[CONF_CONTRACT])
+    else:
+        contract = str(flow.config_entry.data[CONF_CONTRACT])
+    if password:
+        await _save_sip_password(flow.hass, contract, str(password))
+    kept = {str(intercom.id) for intercom in chosen}
+    new_options = {
+        **options,
+        CONF_ENABLED_PANELS: [str(intercom.id) for intercom in chosen],
+        CONF_DISABLED_PANELS: [item for item in known if item not in kept],
+        CONF_SIP_USERNAME: str(user_input.get(CONF_SIP_USERNAME) or "").strip(),
+        CONF_SIP_HOST: str(user_input.get(CONF_SIP_HOST) or DEFAULT_SIP_HOST).strip(),
+        CONF_SIP_PORT: int(user_input.get(CONF_SIP_PORT) or DEFAULT_SIP_PORT),
+        CONF_SHOW_SETUP_AGAIN: bool(user_input.get(CONF_SHOW_SETUP_AGAIN)),
+    }
+    if entry_data is not None:
+        new_options[CONF_CAMERA_MAP] = default_camera_map(chosen)
+        return flow.async_create_entry(
+            title=contract,
+            data=entry_data,
+            options=new_options,
+        )
+    return flow.async_create_entry(title="", data=new_options)
+
+
+class UfanetOptionsFlowHandler(config_entries.OptionsFlow):
+    """Options flow: a checkbox, then addresses and SIP when asked."""
 
     async def async_step_init(
         self, user_input: dict[str, Any] | None = None
     ) -> FlowResult:
-        """Load lists, then walk intercoms one by one."""
+        """Open the address form only when the user asked to see it again."""
         del user_input
-        entry = self.config_entry
+        if self.config_entry.options.get(CONF_SHOW_SETUP_AGAIN):
+            return await self.async_step_setup()
+        return await self.async_step_gate()
+
+    async def async_step_gate(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """One checkbox. The address form stays closed until it is ticked."""
+        if user_input is not None:
+            if user_input.get(CONF_SHOW_SETUP_AGAIN):
+                return await self.async_step_setup()
+            return self.async_create_entry(
+                title="",
+                data={
+                    **self.config_entry.options,
+                    CONF_SHOW_SETUP_AGAIN: False,
+                },
+            )
+        return self.async_show_form(
+            step_id="gate",
+            data_schema=vol.Schema(
+                {vol.Required(CONF_SHOW_SETUP_AGAIN, default=False): bool}
+            ),
+        )
+
+    async def async_step_setup(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Edit which addresses exist and the SIP monitor."""
         try:
-            client = await _client_from_entry(self.hass, entry)
-            self._intercoms = await client.async_get_intercoms()
-            cameras = await client.async_get_cameras()
+            client = await _client_from_entry(self.hass, self.config_entry)
+            intercoms = await client.async_get_intercoms()
         except UfanetApiAuthError:
             return self.async_abort(reason="auth")
         except (UfanetApiError, Exception):
-            _LOGGER.exception("Failed to load intercoms/cameras for options")
+            _LOGGER.exception("Failed to load intercoms for options")
             return self.async_abort(reason="unknown")
-
-        if not self._intercoms:
+        if not intercoms:
             return self.async_abort(reason="no_intercoms")
-
-        self._cameras = [
-            {"number": str(cam.number), "label": camera_label(cam)} for cam in cameras
-        ]
-        self._pending_map = dict(resolve_camera_map(entry, self._intercoms))
-        self._index = 0
-        return await self.async_step_sip()
-
-    async def async_step_sip(
-        self, user_input: dict[str, Any] | None = None
-    ) -> FlowResult:
-        """Save the SIP monitor account from the Ufanet app."""
-        entry = self.config_entry
-        if user_input is not None:
-            password = user_input.get(CONF_SIP_PASSWORD) or ""
-            if password:
-                await _save_sip_password(
-                    self.hass, str(entry.data[CONF_CONTRACT]), str(password)
-                )
-            host = user_input.get(CONF_SIP_HOST) or DEFAULT_SIP_HOST
-            self._sip = {
-                CONF_SIP_USERNAME: (user_input.get(CONF_SIP_USERNAME) or "").strip(),
-                CONF_SIP_HOST: str(host).strip(),
-                CONF_SIP_PORT: int(user_input.get(CONF_SIP_PORT) or DEFAULT_SIP_PORT),
-            }
-            return await self._async_step_after_sip()
-
-        options = entry.options
-        return self.async_show_form(
-            step_id="sip",
-            data_schema=vol.Schema(
-                {
-                    vol.Optional(
-                        CONF_SIP_USERNAME,
-                        description={
-                            "suggested_value": options.get(CONF_SIP_USERNAME, "")
-                        },
-                    ): str,
-                    vol.Optional(CONF_SIP_PASSWORD): selector.TextSelector(
-                        selector.TextSelectorConfig(
-                            type=selector.TextSelectorType.PASSWORD
-                        )
-                    ),
-                    vol.Optional(
-                        CONF_SIP_HOST,
-                        description={
-                            "suggested_value": options.get(
-                                CONF_SIP_HOST, DEFAULT_SIP_HOST
-                            )
-                        },
-                    ): str,
-                    vol.Optional(
-                        CONF_SIP_PORT,
-                        description={
-                            "suggested_value": options.get(
-                                CONF_SIP_PORT, DEFAULT_SIP_PORT
-                            )
-                        },
-                    ): int,
-                }
-            ),
-        )
-
-    def _async_step_after_sip(self) -> Any:
-        """Ask which addresses to keep when the account has more than one."""
-        if len(self._intercoms) > 1:
-            return self.async_step_addresses()
-        self._chosen = list(self._intercoms)
-        self._index = 0
-        return self.async_step_assign()
-
-    async def async_step_addresses(
-        self, user_input: dict[str, Any] | None = None
-    ) -> FlowResult:
-        """Let the user keep the doors that should appear in Home Assistant."""
-        options = [
-            {"value": str(intercom.id), "label": intercom_display_name(intercom)}
-            for intercom in self._intercoms
-        ]
-        saved = self.config_entry.options.get(CONF_ENABLED_PANELS)
-        known = {row["value"] for row in options}
-        default = [str(item) for item in saved] if saved else list(known)
-        default = [item for item in default if item in known]
-        if user_input is not None:
-            selected = [str(item) for item in user_input.get(CONF_ENABLED_PANELS) or []]
-            self._chosen = [
-                intercom for intercom in self._intercoms if str(intercom.id) in selected
-            ]
-            if not self._chosen:
-                return self.async_show_form(
-                    step_id="addresses",
-                    data_schema=self._address_schema(options, default),
-                    errors={"base": "no_address"},
-                )
-            self._index = 0
-            return await self.async_step_assign()
-        return self.async_show_form(
-            step_id="addresses",
-            data_schema=self._address_schema(options, default or list(known)),
-        )
-
-    def _address_schema(
-        self, options: list[dict[str, str]], default: list[str]
-    ) -> vol.Schema:
-        field = selector.SelectSelector(
-            selector.SelectSelectorConfig(
-                options=options,
-                multiple=True,
-                mode=selector.SelectSelectorMode.LIST,
-            )
-        )
-        return vol.Schema({vol.Required(CONF_ENABLED_PANELS, default=default): field})
-
-    async def async_step_assign(
-        self, user_input: dict[str, Any] | None = None
-    ) -> FlowResult:
-        """Assign a camera to the current address."""
-        if not self._chosen:
-            self._chosen = list(self._intercoms)
-        intercom = self._chosen[self._index]
-        key = str(intercom.id)
-        address = intercom_display_name(intercom)
-
-        if user_input is not None:
-            selected = user_input.get(CONF_CAMERA_MAP, NONE_CAMERA)
-            if selected and selected != NONE_CAMERA:
-                self._pending_map[key] = str(selected)
-            else:
-                self._pending_map.pop(key, None)
-
-            self._index += 1
-            if self._index >= len(self._chosen):
-                kept = {str(item.id) for item in self._chosen}
-                camera_map = {
-                    panel_id: camera
-                    for panel_id, camera in self._pending_map.items()
-                    if panel_id in kept
-                }
-                return self.async_create_entry(
-                    title="",
-                    data={
-                        **self.config_entry.options,
-                        **getattr(self, "_sip", {}),
-                        CONF_ENABLED_PANELS: [str(item.id) for item in self._chosen],
-                        CONF_CAMERA_MAP: camera_map,
-                    },
-                )
-            return await self.async_step_assign()
-
-        taken = {
-            camera for panel_id, camera in self._pending_map.items() if panel_id != key
-        }
-        ordered = dict(order_cameras_for_address(address, self._cameras, taken))
-        choices = {NONE_CAMERA: "—", **ordered}
-        default = self._pending_map.get(key, NONE_CAMERA)
-        if default not in choices:
-            default = NONE_CAMERA
-
-        return self.async_show_form(
-            step_id="assign",
-            data_schema=vol.Schema(
-                {vol.Required(CONF_CAMERA_MAP, default=default): vol.In(choices)}
-            ),
-            description_placeholders={
-                "intercom": address,
-                "house": primary_house(address) or "—",
-                "progress": f"{self._index + 1}/{len(self._chosen)}",
-            },
+        return await _async_finish_setup(
+            self,
+            intercoms,
+            user_input,
+            options=dict(self.config_entry.options),
         )

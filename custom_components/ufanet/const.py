@@ -16,6 +16,10 @@ CONF_DOM_URL = "dom_url"
 CONF_CAMERA_MAP = "camera_map"
 # Intercom ids the user kept. Missing means every address from the account.
 CONF_ENABLED_PANELS = "enabled_panels"
+# Intercom ids removed from the integration page. They stay gone.
+CONF_DISABLED_PANELS = "disabled_panels"
+# When true, Configure opens the address and SIP form. Otherwise one checkbox.
+CONF_SHOW_SETUP_AGAIN = "show_setup_again"
 AUTH_PASSWORD = "password"
 AUTH_PHONE = "phone"
 

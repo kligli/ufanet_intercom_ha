@@ -49,18 +49,20 @@ def intercom_device_info(
 
 
 def filter_enabled_intercoms(
-    intercoms: list[IntercomInfo], enabled_ids: list[Any] | None
+    intercoms: list[IntercomInfo],
+    enabled_ids: list[Any] | None,
+    disabled_ids: list[Any] | None = None,
 ) -> list[IntercomInfo]:
-    """Keep the addresses the user chose.
+    """Keep the addresses the user chose and drop ones they removed.
 
-    A missing list means the whole account. A saved list that matches nothing
-    current falls back to every address so a renamed id cannot hide all doors.
+    A missing enabled list means the whole account, minus removed doors.
+    An explicit enabled list is used as-is, so clearing a door stays cleared.
     """
-    if not enabled_ids:
-        return list(intercoms)
-    allow = {str(item) for item in enabled_ids}
-    chosen = [intercom for intercom in intercoms if str(intercom.id) in allow]
-    return chosen or list(intercoms)
+    disabled = {str(item) for item in (disabled_ids or [])}
+    if enabled_ids:
+        allow = {str(item) for item in enabled_ids} - disabled
+        return [intercom for intercom in intercoms if str(intercom.id) in allow]
+    return [intercom for intercom in intercoms if str(intercom.id) not in disabled]
 
 
 def default_camera_map(intercoms: list[IntercomInfo]) -> dict[str, str]:

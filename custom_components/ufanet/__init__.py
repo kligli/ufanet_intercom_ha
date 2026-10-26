@@ -27,6 +27,7 @@ from .const import (
     CONF_AUTH_METHOD,
     CONF_CAMERA_MAP,
     CONF_CONTRACT,
+    CONF_DISABLED_PANELS,
     CONF_DOM_URL,
     CONF_ENABLED_PANELS,
     CONF_REFRESH_TOKEN,
@@ -44,7 +45,6 @@ from .coordinator import UfanetCallCoordinator
 from .helpers import (
     default_camera_map,
     filter_enabled_intercoms,
-    intercom_device_id,
     resolve_camera_map,
 )
 from .sip import SipMonitor
@@ -235,7 +235,9 @@ async def async_setup_entry(  # noqa: PLR0915
         raise ConfigEntryNotReady(msg)
 
     intercoms = filter_enabled_intercoms(
-        intercoms, entry.options.get(CONF_ENABLED_PANELS)
+        intercoms,
+        entry.options.get(CONF_ENABLED_PANELS),
+        entry.options.get(CONF_DISABLED_PANELS),
     )
 
     # Seed options with API defaults once, so the UI shows current links.
@@ -266,12 +268,6 @@ async def async_setup_entry(  # noqa: PLR0915
         name=f"Ufanet {contract}",
         model="Video intercom account",
     )
-    live_identifiers = {intercom_device_id(contract, item.id) for item in intercoms}
-    live_identifiers.add(contract)
-    for device in dr.async_entries_for_config_entry(device_registry, entry.entry_id):
-        own = {ident for domain, ident in device.identifiers if domain == DOMAIN}
-        if own and own.isdisjoint(live_identifiers):
-            device_registry.async_remove_device(device.id)
 
     sip = await _start_sip(hass, entry, credentials)
     entry.runtime_data = UfanetRuntimeData(
@@ -300,6 +296,38 @@ async def async_setup_entry(  # noqa: PLR0915
 async def _async_reload_entry(hass: HomeAssistant, entry: UfanetConfigEntry) -> None:
     """Reload when options (camera map) change."""
     await hass.config_entries.async_reload(entry.entry_id)
+
+
+async def async_remove_config_entry_device(
+    hass: HomeAssistant, config_entry: ConfigEntry, device_entry: dr.DeviceEntry
+) -> bool:
+    """Remember a removed door so setup does not create it again."""
+    contract = str(config_entry.data.get(CONF_CONTRACT) or "")
+    prefix = f"{contract}_"
+    panel_ids: list[str] = []
+    for domain, ident in device_entry.identifiers:
+        if domain != DOMAIN:
+            continue
+        text = str(ident)
+        if text == contract:
+            return False
+        if text.startswith(prefix) and text.removeprefix(prefix).isdigit():
+            panel_ids.append(text.removeprefix(prefix))
+    if not panel_ids:
+        return False
+    options = dict(config_entry.options)
+    disabled = [str(item) for item in options.get(CONF_DISABLED_PANELS) or []]
+    enabled = options.get(CONF_ENABLED_PANELS)
+    for panel_id in panel_ids:
+        if panel_id not in disabled:
+            disabled.append(panel_id)
+    options[CONF_DISABLED_PANELS] = disabled
+    if isinstance(enabled, list):
+        options[CONF_ENABLED_PANELS] = [
+            str(item) for item in enabled if str(item) not in panel_ids
+        ]
+    hass.config_entries.async_update_entry(config_entry, options=options)
+    return True
 
 
 async def async_unload_entry(hass: HomeAssistant, entry: UfanetConfigEntry) -> bool:
