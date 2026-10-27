@@ -107,8 +107,12 @@ def cameras_by_number(cameras: list[CameraInfo]) -> dict[str, CameraInfo]:
 
 
 def live_stream_url(domain: str, number: str, token: str) -> str:
-    """RTSP URL that includes the intercom microphone (Flussonic track a1)."""
-    return f"rtsp://{domain}/{number}?token={token}&tracks=v1a1"
+    """HTTPS live view.
+
+    RTSP port 554 from Home Assistant to the camera times out. Flussonic
+    serves the same picture and AAC audio on port 443.
+    """
+    return f"https://{domain}/{number}/index.m3u8?token={token}&tracks=v1a1"
 
 
 def whep_url(domain: str, number: str, token: str) -> str:
