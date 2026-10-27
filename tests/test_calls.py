@@ -33,6 +33,19 @@ def test_panel_name_prefers_street_over_role() -> None:
     )
 
 
+def test_visit_notice_shows_the_door_picture_without_sip() -> None:
+    """A history ring still shows the snapshot when the monitor did not answer."""
+    text = calls.visit_notice(
+        "Мушникова 13/7",
+        "camera.door",
+        "button.door",
+        sip_answered=False,
+    )
+    assert "![Дверь](/api/camera_proxy/camera.door)" in text
+    assert "Мушникова 13/7" in text
+    assert "Трубка не снята" in text
+
+
 def test_visit_keeps_every_panel_until_history_names_one() -> None:
     """A SIP invite does not say which door rang."""
     panels = [

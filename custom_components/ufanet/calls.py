@@ -404,6 +404,26 @@ def order_cameras_for_address(
     return [(number, label) for _rank, label, number in ranked]
 
 
+def visit_notice(
+    address: str | None,
+    camera_entity: str | None,
+    door_entity: str | None,
+    *,
+    sip_answered: bool,
+) -> str:
+    """Text for the doorbell notification, including the door picture."""
+    lines = ["Звонок в домофон."]
+    if address:
+        lines.append(address)
+    if camera_entity:
+        lines.append(f"![Дверь](/api/camera_proxy/{camera_entity})")
+    if door_entity:
+        lines.append(f"Открыть дверь: {door_entity}.")
+    if not sip_answered:
+        lines.append("Трубка не снята: SIP-монитор этот вызов не принял.")
+    return "\n\n".join(lines)
+
+
 def visit_panel_ids(
     panels: list[tuple[int, str | None, str | None]],
     calls: list[CallRecord],
